@@ -201,10 +201,13 @@ cython_debug/
 .cursorignore
 .cursorindexingignore
 
-# Smoke-test outputs
+# Runtime/pipeline outputs — never commit
 data/test_outputs/
 data/demo_outputs/
 data/jobs/
+data/extracted_frames/
+data/reconstruction/
+data/digital_twin_scene.*
 .superpowers/
 
 # Marimo
