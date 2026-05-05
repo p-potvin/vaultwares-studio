@@ -27,19 +27,17 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 try:
-    from qfluentwidgets import BodyLabel
+    from qfluentwidgets import BodyLabel  # type: ignore[assignment]
     from qfluentwidgets import FluentIcon as FIF
-    from qfluentwidgets import (
-        ComboBox,
-        FluentWindow,
-        NavigationItemPosition,
-        PrimaryPushButton,
-        SubtitleLabel,
-        TextEdit,
-        Theme,
-        setTheme,
-        setThemeColor,
-    )
+    from qfluentwidgets import ComboBox
+    from qfluentwidgets import FluentWindow  # type: ignore[assignment]
+    from qfluentwidgets import NavigationItemPosition
+    from qfluentwidgets import PrimaryPushButton  # type: ignore[assignment]
+    from qfluentwidgets import SubtitleLabel  # type: ignore[assignment]
+    from qfluentwidgets import TextEdit
+    from qfluentwidgets import Theme
+    from qfluentwidgets import setTheme  # type: ignore[assignment]
+    from qfluentwidgets import setThemeColor  # type: ignore[assignment]
 except ImportError:
     from PySide6.QtWidgets import QTextEdit as TextEdit
 
@@ -61,6 +59,7 @@ except ImportError:
 
     class _FallbackTheme:
         LIGHT = None
+        DARK = None
 
     class BodyLabel(QLabel):
         pass
@@ -154,7 +153,7 @@ def build_stylesheet(theme: VaultTheme) -> str:
 
 def card_style(theme: VaultTheme) -> str:
     return (
-        f"QFrame {{ background: {theme.surface}; border: 1px solid {theme.border_subtle};"
+        f"QFrame {{ background: {theme.surface}; border: 1px solid {theme.border};"
         " border-radius: 8px; }}"
     )
 
@@ -178,13 +177,13 @@ def state_card_style(theme: VaultTheme, state: str) -> str:
     if state == StageState.COMPLETE.value:
         left_color = theme.success
     elif state == StageState.FAILED.value:
-        left_color = theme.danger
+        left_color = theme.error
     elif state == StageState.RUNNING.value:
-        left_color = theme.accent_hover
+        left_color = theme.accent_muted
     else:
-        left_color = theme.border_subtle
+        left_color = theme.border
     return (
-        f"QFrame {{ background: {theme.surface}; border: 1px solid {theme.border_subtle};"
+        f"QFrame {{ background: {theme.surface}; border: 1px solid {theme.border};"
         f" border-left: 4px solid {left_color}; border-radius: 8px; }}"
     )
 STATE_LABELS = {
@@ -276,7 +275,7 @@ class SettingsTab(QFrame):
         self.health_view.setPlainText("\n".join(lines))
 
     def _on_theme_changed(self, index: int) -> None:
-        theme = _tm.get_theme(index)
+        theme = _tm.get_theme(index=index)
         self.theme_swatch.setStyleSheet(
             f"background: {theme.accent}; border-radius: 4px;"
         )
@@ -395,7 +394,7 @@ class DashboardWidget(QFrame):
         self.progress_bar.setTextVisible(False)
         self.progress_bar.setRange(0, 100)
         state_layout.addWidget(self.state_title, 0, 0)
-        state_layout.addWidget(self.progress_label, 0, 1, 1, 1, Qt.AlignRight)
+        state_layout.addWidget(self.progress_label, 0, 1, 1, 1, Qt.AlignmentFlag.AlignRight)
         state_layout.addWidget(self.state_message, 1, 0, 1, 2)
         state_layout.addWidget(self.progress_bar, 2, 0, 1, 2)
         layout.addWidget(self.state_card)
@@ -417,8 +416,6 @@ class DashboardWidget(QFrame):
 
         summary_card = QFrame(page)
         summary_card.setStyleSheet(card_style(_active_theme))
-        self._normal_cards.append(summary_card(_active_theme))
-        self._normal_cards.append(summary_card(_active_theme))
         self._normal_cards.append(summary_card)
         summary_layout = QVBoxLayout(summary_card)
         summary_layout.setContentsMargins(18, 18, 18, 18)
@@ -456,7 +453,7 @@ class DashboardWidget(QFrame):
         self.preview_labels: list[QLabel] = []
         for _ in range(3):
             label = QLabel("Preview pending", preview_card)
-            label.setAlignment(Qt.AlignCenter)
+            label.setAlignment(Qt.AlignmentFlag.AlignCenter)
             label.setWordWrap(True)
             label.setStyleSheet(preview_style(_active_theme))
             self.preview_labels.append(label)
@@ -531,10 +528,10 @@ class DashboardWidget(QFrame):
         self.app_url_edit.setPlaceholderText("Vault Flows app URL")
         self.bearer_token_edit = QLineEdit(integration_card)
         self.bearer_token_edit.setPlaceholderText("Bearer token (optional)")
-        self.bearer_token_edit.setEchoMode(QLineEdit.Password)
+        self.bearer_token_edit.setEchoMode(QLineEdit.EchoMode.Password)
         self.api_key_edit = QLineEdit(integration_card)
         self.api_key_edit.setPlaceholderText("API key (optional)")
-        self.api_key_edit.setEchoMode(QLineEdit.Password)
+        self.api_key_edit.setEchoMode(QLineEdit.EchoMode.Password)
         integration_layout.addWidget(self.api_base_edit)
         integration_layout.addWidget(self.app_url_edit)
         integration_layout.addWidget(self.bearer_token_edit)
@@ -650,7 +647,7 @@ class DashboardWidget(QFrame):
     def _on_stage_selected(self, current: QListWidgetItem | None, _previous: QListWidgetItem | None) -> None:
         if current is None:
             return
-        self.selected_stage_key = current.data(Qt.UserRole)
+        self.selected_stage_key = current.data(Qt.ItemDataRole.UserRole)
         self.show_finish_panel = False
         self._render_manifest()
 
@@ -701,7 +698,7 @@ class DashboardWidget(QFrame):
         for index, stage in enumerate(self.manifest.stages, start=1):
             label = f"{index}. {stage.title}  [{STATE_LABELS.get(stage.state, stage.state)}]"
             item = QListWidgetItem(label)
-            item.setData(Qt.UserRole, stage.key)
+            item.setData(Qt.ItemDataRole.UserRole, stage.key)
             self.stage_list.addItem(item)
             if stage.key == self.selected_stage_key:
                 self.stage_list.setCurrentItem(item)
@@ -746,7 +743,7 @@ class DashboardWidget(QFrame):
         for label, artifact in zip(self.preview_labels, image_artifacts[:3], strict=False):
             pixmap = QPixmap(artifact.path)
             if not pixmap.isNull():
-                label.setPixmap(pixmap.scaled(260, 160, Qt.KeepAspectRatio, Qt.SmoothTransformation))
+                label.setPixmap(pixmap.scaled(260, 160, Qt.AspectRatioMode.KeepAspectRatio, Qt.TransformationMode.SmoothTransformation))
             else:
                 label.setText(Path(artifact.path).name)
         for label in self.preview_labels[len(image_artifacts[:3]):]:
@@ -883,16 +880,18 @@ class Window(FluentWindow):
         qt_theme = Theme.DARK if theme.mode == "dark" else Theme.LIGHT
         setTheme(qt_theme)
         setThemeColor(QColor(theme.accent))
-        QApplication.instance().setStyleSheet(build_stylesheet(theme))
+        _qapp = QApplication.instance()
+        if isinstance(_qapp, QApplication):
+            _qapp.setStyleSheet(build_stylesheet(theme))
         self.dashboard.refresh_cards(theme)
         self.settings.setStyleSheet(card_style(theme))
 
 
 if __name__ == "__main__":
     if sys.stdout.encoding != "utf-8":
-        sys.stdout.reconfigure(encoding="utf-8")
+        sys.stdout.reconfigure(encoding="utf-8")  # type: ignore[attr-defined]
     if sys.stderr.encoding != "utf-8":
-        sys.stderr.reconfigure(encoding="utf-8")
+        sys.stderr.reconfigure(encoding="utf-8")  # type: ignore[attr-defined]
 
     app = QApplication(sys.argv)
     font = QFont("Segoe UI Semilight", 10)
