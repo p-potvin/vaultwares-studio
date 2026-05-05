@@ -3,10 +3,7 @@ $ErrorActionPreference = "Stop"
 $RepoRoot = Split-Path -Parent $MyInvocation.MyCommand.Path
 Set-Location $RepoRoot
 
-$Python = Join-Path $RepoRoot ".venv\Scripts\python.exe"
-if (-not (Test-Path $Python)) {
-    throw "Expected Python virtual environment at .venv\Scripts\python.exe"
-}
+$Python = "python.exe"
 
 Write-Host "Installing PyInstaller into the local virtual environment..." -ForegroundColor Cyan
 & $Python -m pip install pyinstaller

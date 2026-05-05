@@ -19,7 +19,7 @@
 # Use this for USD authoring without the full Omniverse runtime.
 # For Omniverse/Isaac Sim integration, the USD API is bundled with omniverse-kit.
 # -----------------------------------------------------------------------------
-usd-core>=24.11
+usd-core==24.11
 
 
 # -----------------------------------------------------------------------------
@@ -146,6 +146,6 @@ jupyterlab>=4.2.0
 # GROUP 13 — Runtime App Dependencies (GUI + Orchestration)
 # -----------------------------------------------------------------------------
 redis>=5.0.0
-PySide6>=6.6.0
+PySide6==6.7.2
 PySide6-Fluent-Widgets>=1.11.0
 pycolmap>=4.0.0

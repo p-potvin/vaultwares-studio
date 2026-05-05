@@ -7,7 +7,7 @@ import shutil
 import threading
 from pathlib import Path
 from PySide6.QtCore import QObject, Qt, Signal
-from PySide6.QtGui import QIcon, QPixmap
+from PySide6.QtGui import QColor, QFont, QIcon, QPixmap
 from PySide6.QtWidgets import (
     QApplication,
     QFileDialog,
@@ -30,6 +30,7 @@ try:
     from qfluentwidgets import BodyLabel
     from qfluentwidgets import FluentIcon as FIF
     from qfluentwidgets import (
+        ComboBox,
         FluentWindow,
         NavigationItemPosition,
         PrimaryPushButton,
@@ -37,6 +38,7 @@ try:
         TextEdit,
         Theme,
         setTheme,
+        setThemeColor,
     )
 except ImportError:
     from PySide6.QtWidgets import QTextEdit as TextEdit
@@ -82,6 +84,11 @@ except ImportError:
     def setTheme(_theme) -> None:
         return None
 
+    def setThemeColor(_color: object) -> None:
+        return None
+
+    from PySide6.QtWidgets import QComboBox as ComboBox  # noqa: E402
+
     FIF = _FallbackIcon()
     NavigationItemPosition = _FallbackNavigationItemPosition()
     Theme = _FallbackTheme()
@@ -108,41 +115,78 @@ from studio_core.integration import (
 from studio_core.viewer import open_live_viewer
 
 ROOT = Path(__file__).resolve().parent
-ICON_PATH = ROOT / "icon.png"
-VAULT_COLORS = {
-    "paper": "#FDFCF7",
-    "paper_alt": "#F7F5EA",
-    "surface": "#FDFDFD",
-    "border": "#D6D2C4",
-    "cyan": "#21B8CC",
-    "deep_blue": "#0A2540",
-    "muted": "#586E75",
-    "ink": "#002B36",
-}
-CARD_STYLE = """
-QFrame {
-    background: %s;
-    border: 1px solid %s;
-    border-radius: 8px;
-}
-""" % (VAULT_COLORS["paper"], VAULT_COLORS["border"])
-ACCENT_CARD_STYLE = """
-QFrame {
-    background: %s;
-    border: 1px solid %s;
-    border-radius: 8px;
-}
-""" % (VAULT_COLORS["paper_alt"], VAULT_COLORS["cyan"])
-PREVIEW_STYLE = """
-QLabel {
-    background: %s;
-    color: %s;
-    border: 1px dashed %s;
-    border-radius: 8px;
-    min-height: 120px;
-    padding: 12px;
-}
-""" % (VAULT_COLORS["surface"], VAULT_COLORS["ink"], VAULT_COLORS["muted"])
+ICON_PATH = ROOT / "Brand" / "favicons" / "vaultwares-favicon-gold-filled-256.png"
+
+sys.path.insert(0, str(ROOT / "vault-themes"))
+try:
+    from theme_manager import VaultTheme, VaultThemeManager  # noqa: E402
+except ImportError as _exc:
+    raise RuntimeError(
+        "vault-themes submodule not found. Run: git submodule update --init vault-themes"
+    ) from _exc
+
+
+def _detect_os_theme() -> str:
+    try:
+        import winreg  # noqa: PLC0415
+        with winreg.OpenKey(
+            winreg.HKEY_CURRENT_USER,
+            r"Software\Microsoft\Windows\CurrentVersion\Themes\Personalize",
+        ) as key:
+            value, _ = winreg.QueryValueEx(key, "AppsUseLightTheme")
+            return "light" if value == 1 else "dark"
+    except Exception:  # noqa: BLE001
+        return "dark"
+
+
+_tm = VaultThemeManager()
+_active_theme: VaultTheme = _tm.get_theme_by_name(
+    "Solarized Light Revisited" if _detect_os_theme() == "light" else "Golden Slate"
+)
+
+
+def build_stylesheet(theme: VaultTheme) -> str:
+    return (
+        f"QWidget {{ background: {theme.background}; color: {theme.text_primary}; }}"
+        f" QFrame {{ background: {theme.surface}; }}"
+    )
+
+
+def card_style(theme: VaultTheme) -> str:
+    return (
+        f"QFrame {{ background: {theme.surface}; border: 1px solid {theme.border_subtle};"
+        " border-radius: 8px; }}"
+    )
+
+
+def accent_card_style(theme: VaultTheme) -> str:
+    return (
+        f"QFrame {{ background: {theme.surface_elevated}; border: 1px solid {theme.accent};"
+        " border-radius: 8px; }}"
+    )
+
+
+def preview_style(theme: VaultTheme) -> str:
+    return (
+        f"QLabel {{ background: {theme.surface_elevated}; color: {theme.text_secondary};"
+        f" border: 1px dashed {theme.text_muted}; border-radius: 8px;"
+        " min-height: 120px; padding: 12px; }}"
+    )
+
+
+def state_card_style(theme: VaultTheme, state: str) -> str:
+    if state == StageState.COMPLETE.value:
+        left_color = theme.success
+    elif state == StageState.FAILED.value:
+        left_color = theme.danger
+    elif state == StageState.RUNNING.value:
+        left_color = theme.accent_hover
+    else:
+        left_color = theme.border_subtle
+    return (
+        f"QFrame {{ background: {theme.surface}; border: 1px solid {theme.border_subtle};"
+        f" border-left: 4px solid {left_color}; border-radius: 8px; }}"
+    )
 STATE_LABELS = {
     StageState.QUEUED.value: "Queued",
     StageState.RUNNING.value: "Running",
@@ -167,10 +211,12 @@ def _open_path(path: Path) -> None:
 
 
 class SettingsTab(QFrame):
+    theme_changed = Signal(object)
+
     def __init__(self, parent: QWidget | None = None):
         super().__init__(parent=parent)
         self.setObjectName("Settings")
-        self.setStyleSheet(CARD_STYLE)
+        self.setStyleSheet(card_style(_active_theme))
 
         layout = QVBoxLayout(self)
         layout.setContentsMargins(18, 18, 18, 18)
@@ -193,7 +239,26 @@ class SettingsTab(QFrame):
         self.health_view.setReadOnly(True)
         layout.addWidget(self.health_view)
 
+        # --- theme picker ---
+        theme_row = QHBoxLayout()
+        theme_label = BodyLabel("Theme:", self)
+        theme_row.addWidget(theme_label)
+        self.theme_combo = ComboBox(self)
+        for t in _tm.get_themes():
+            self.theme_combo.addItem(t.name)
+        self.theme_combo.setCurrentText(_active_theme.name)
+        theme_row.addWidget(self.theme_combo, 1)
+        self.theme_swatch = QFrame(self)
+        self.theme_swatch.setFixedSize(24, 24)
+        self.theme_swatch.setStyleSheet(
+            f"background: {_active_theme.accent}; border-radius: 4px;"
+        )
+        theme_row.addWidget(self.theme_swatch)
+        layout.addLayout(theme_row)
+        # --- end theme picker ---
+
         self.refresh_btn.clicked.connect(self.refresh_dependency_health)
+        self.theme_combo.currentIndexChanged.connect(self._on_theme_changed)
         self.refresh_dependency_health()
 
     def set_mode(self, strict_mode: bool) -> None:
@@ -210,6 +275,13 @@ class SettingsTab(QFrame):
             lines.append(f"[{row['status'].upper()}] {row['kind']}: {row['name']} -> {row['detail']}")
         self.health_view.setPlainText("\n".join(lines))
 
+    def _on_theme_changed(self, index: int) -> None:
+        theme = _tm.get_theme(index)
+        self.theme_swatch.setStyleSheet(
+            f"background: {theme.accent}; border-radius: 4px;"
+        )
+        self.theme_changed.emit(theme)
+
 
 class DashboardWidget(QFrame):
     def __init__(self, parent: QWidget | None = None):
@@ -225,6 +297,8 @@ class DashboardWidget(QFrame):
         self.show_finish_panel = False
         self.manifest = create_job_manifest(DEFAULT_SOURCE_VIDEO)
         self.selected_stage_key = self.manifest.current_stage_key
+        self._normal_cards: list[QFrame] = []
+        self._accent_cards: list[QFrame] = []
 
         root_layout = QHBoxLayout(self)
         root_layout.setContentsMargins(16, 16, 16, 16)
@@ -246,7 +320,8 @@ class DashboardWidget(QFrame):
         layout.setSpacing(14)
 
         job_card = QFrame(container)
-        job_card.setStyleSheet(ACCENT_CARD_STYLE)
+        job_card.setStyleSheet(accent_card_style(_active_theme))
+        self._accent_cards.append(job_card)
         job_layout = QVBoxLayout(job_card)
         job_layout.setContentsMargins(18, 18, 18, 18)
         self.job_title = SubtitleLabel("Current Job", job_card)
@@ -268,7 +343,8 @@ class DashboardWidget(QFrame):
         layout.addWidget(job_card)
 
         stages_card = QFrame(container)
-        stages_card.setStyleSheet(CARD_STYLE)
+        stages_card.setStyleSheet(card_style(_active_theme))
+        self._normal_cards.append(stages_card)
         stages_layout = QVBoxLayout(stages_card)
         stages_layout.setContentsMargins(18, 18, 18, 18)
         stages_layout.addWidget(SubtitleLabel("Job Steps", stages_card))
@@ -277,7 +353,8 @@ class DashboardWidget(QFrame):
         layout.addWidget(stages_card, 1)
 
         actions_card = QFrame(container)
-        actions_card.setStyleSheet(CARD_STYLE)
+        actions_card.setStyleSheet(card_style(_active_theme))
+        self._normal_cards.append(actions_card)
         actions_layout = QVBoxLayout(actions_card)
         actions_layout.setContentsMargins(18, 18, 18, 18)
         self.run_full_job_btn = PrimaryPushButton(FIF.PLAY_SOLID, "Run Full Job", actions_card)
@@ -305,7 +382,8 @@ class DashboardWidget(QFrame):
         layout.setSpacing(14)
 
         self.state_card = QFrame(container)
-        self.state_card.setStyleSheet(ACCENT_CARD_STYLE)
+        self.state_card.setStyleSheet(state_card_style(_active_theme, StageState.QUEUED.value))
+        self._accent_cards.append(self.state_card)
         state_layout = QGridLayout(self.state_card)
         state_layout.setContentsMargins(18, 18, 18, 18)
         state_layout.setHorizontalSpacing(18)
@@ -338,7 +416,10 @@ class DashboardWidget(QFrame):
         layout.setSpacing(14)
 
         summary_card = QFrame(page)
-        summary_card.setStyleSheet(CARD_STYLE)
+        summary_card.setStyleSheet(card_style(_active_theme))
+        self._normal_cards.append(summary_card(_active_theme))
+        self._normal_cards.append(summary_card(_active_theme))
+        self._normal_cards.append(summary_card)
         summary_layout = QVBoxLayout(summary_card)
         summary_layout.setContentsMargins(18, 18, 18, 18)
         self.step_title = SubtitleLabel("", summary_card)
@@ -352,7 +433,8 @@ class DashboardWidget(QFrame):
         layout.addWidget(summary_card)
 
         prompt_card = QFrame(page)
-        prompt_card.setStyleSheet(CARD_STYLE)
+        prompt_card.setStyleSheet(card_style(_active_theme))
+        self._normal_cards.append(prompt_card)
         prompt_layout = QVBoxLayout(prompt_card)
         prompt_layout.setContentsMargins(18, 18, 18, 18)
         prompt_layout.addWidget(SubtitleLabel("Prompt Camera Director", prompt_card))
@@ -365,7 +447,8 @@ class DashboardWidget(QFrame):
         self.camera_prompt_card = prompt_card
 
         preview_card = QFrame(page)
-        preview_card.setStyleSheet(CARD_STYLE)
+        preview_card.setStyleSheet(card_style(_active_theme))
+        self._normal_cards.append(preview_card)
         preview_layout = QVBoxLayout(preview_card)
         preview_layout.setContentsMargins(18, 18, 18, 18)
         preview_layout.addWidget(SubtitleLabel("Stage Previews", preview_card))
@@ -375,14 +458,15 @@ class DashboardWidget(QFrame):
             label = QLabel("Preview pending", preview_card)
             label.setAlignment(Qt.AlignCenter)
             label.setWordWrap(True)
-            label.setStyleSheet(PREVIEW_STYLE)
-            preview_grid.addWidget(label)
+            label.setStyleSheet(preview_style(_active_theme))
             self.preview_labels.append(label)
+            preview_grid.addWidget(label)
         preview_layout.addLayout(preview_grid)
         layout.addWidget(preview_card)
 
         artifact_card = QFrame(page)
-        artifact_card.setStyleSheet(CARD_STYLE)
+        artifact_card.setStyleSheet(card_style(_active_theme))
+        self._normal_cards.append(artifact_card)
         artifact_layout = QVBoxLayout(artifact_card)
         artifact_layout.setContentsMargins(18, 18, 18, 18)
         artifact_layout.addWidget(SubtitleLabel("Artifacts", artifact_card))
@@ -391,7 +475,8 @@ class DashboardWidget(QFrame):
         layout.addWidget(artifact_card)
 
         log_card = QFrame(page)
-        log_card.setStyleSheet(CARD_STYLE)
+        log_card.setStyleSheet(card_style(_active_theme))
+        self._normal_cards.append(log_card)
         log_layout = QVBoxLayout(log_card)
         log_layout.setContentsMargins(18, 18, 18, 18)
         log_layout.addWidget(SubtitleLabel("Run Log", log_card))
@@ -413,7 +498,8 @@ class DashboardWidget(QFrame):
         layout.setSpacing(14)
 
         finish_card = QFrame(page)
-        finish_card.setStyleSheet(CARD_STYLE)
+        finish_card.setStyleSheet(card_style(_active_theme))
+        self._normal_cards.append(finish_card)
         finish_layout = QVBoxLayout(finish_card)
         finish_layout.setContentsMargins(18, 18, 18, 18)
         finish_layout.addWidget(SubtitleLabel("Final Review", finish_card))
@@ -432,7 +518,8 @@ class DashboardWidget(QFrame):
         layout.addWidget(finish_card)
 
         integration_card = QFrame(page)
-        integration_card.setStyleSheet(CARD_STYLE)
+        integration_card.setStyleSheet(card_style(_active_theme))
+        self._normal_cards.append(integration_card)
         integration_layout = QVBoxLayout(integration_card)
         integration_layout.setContentsMargins(18, 18, 18, 18)
         integration_layout.addWidget(SubtitleLabel("VaultWares Integration", integration_card))
@@ -466,7 +553,8 @@ class DashboardWidget(QFrame):
         layout.addWidget(integration_card)
 
         detail_card = QFrame(page)
-        detail_card.setStyleSheet(CARD_STYLE)
+        detail_card.setStyleSheet(card_style(_active_theme))
+        self._normal_cards.append(detail_card)
         detail_layout = QVBoxLayout(detail_card)
         detail_layout.setContentsMargins(18, 18, 18, 18)
         detail_layout.addWidget(SubtitleLabel("Inspect Previous Steps", detail_card))
@@ -627,6 +715,7 @@ class DashboardWidget(QFrame):
         self.state_message.setText(current_stage.message or "Ready to execute the selected stage.")
         self.progress_bar.setValue(progress)
         self.progress_label.setText(f"Step {completed if completed < total else total} of {total}")
+        self.state_card.setStyleSheet(state_card_style(_active_theme, self.manifest.state))
 
         self.finish_summary.setText(
             "The digital twin job completed. Open the final walkthrough video, launch the optional live 3D viewer, or inspect any previous step from the rail."
@@ -757,6 +846,15 @@ class DashboardWidget(QFrame):
         self.strict_mode = strict_mode
         self._append_log(f"Strict mode set to {strict_mode}")
 
+    def refresh_cards(self, theme: VaultTheme) -> None:
+        for card in self._normal_cards:
+            card.setStyleSheet(card_style(theme))
+        for card in self._accent_cards:
+            card.setStyleSheet(accent_card_style(theme))
+        self.state_card.setStyleSheet(state_card_style(theme, self.manifest.state))
+        for label in self.preview_labels:
+            label.setStyleSheet(preview_style(theme))
+
 
 class Window(FluentWindow):
     def __init__(self):
@@ -768,6 +866,7 @@ class Window(FluentWindow):
         self.dashboard = DashboardWidget(self)
         self.settings = SettingsTab(self)
         self.settings.toggle_btn.clicked.connect(self._toggle_strict_mode)
+        self.settings.theme_changed.connect(self._apply_theme)
 
         self.addSubInterface(self.dashboard, FIF.HOME, "Studio")
         self.addSubInterface(self.settings, FIF.SETTING, "Settings", NavigationItemPosition.BOTTOM)
@@ -778,6 +877,16 @@ class Window(FluentWindow):
         self.dashboard.set_strict_mode(strict_mode)
         self.settings.set_mode(strict_mode)
 
+    def _apply_theme(self, theme: VaultTheme) -> None:
+        global _active_theme
+        _active_theme = theme
+        qt_theme = Theme.DARK if theme.mode == "dark" else Theme.LIGHT
+        setTheme(qt_theme)
+        setThemeColor(QColor(theme.accent))
+        QApplication.instance().setStyleSheet(build_stylesheet(theme))
+        self.dashboard.refresh_cards(theme)
+        self.settings.setStyleSheet(card_style(theme))
+
 
 if __name__ == "__main__":
     if sys.stdout.encoding != "utf-8":
@@ -786,7 +895,12 @@ if __name__ == "__main__":
         sys.stderr.reconfigure(encoding="utf-8")
 
     app = QApplication(sys.argv)
-    setTheme(Theme.LIGHT)
+    font = QFont("Segoe UI Semilight", 10)
+    app.setFont(font)
+    qt_theme = Theme.DARK if _active_theme.mode == "dark" else Theme.LIGHT
+    setTheme(qt_theme)
+    setThemeColor(QColor(_active_theme.accent))
+    app.setStyleSheet(build_stylesheet(_active_theme))
     window = Window()
     window.show()
     sys.exit(app.exec())

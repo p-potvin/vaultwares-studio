@@ -1,15 +1,19 @@
 <!-- VAULT-THEMES-SUBMODULE:START -->
 ## Vault Themes Submodule Rules
 
-If this repository includes the `vault-themes` submodule, you MUST read the following files before making changes related to UI, branding, design systems, token usage, shared components, authentication UX, encrypted client-to-client communication, or Figma-derived implementation:
+This repository includes `vault-themes`. Before changing UI, branding, design
+systems, theme tokens, shared components, authentication UX, encrypted
+client-to-client communication UX, Figma-derived implementation, or agent/IDE
+instructions, read these stable root files:
 
 - `vault-themes/AGENTS.md`
-- `vault-themes/.github/STYLE.md`
-- `vault-themes/.github/INSTRUCTIONS.md`
+- `vault-themes/CONTEXT.md`
 
-When theme token roles, contrast helpers, or executable theme governance matter, also inspect:
+When the submodule has the cleaned layout, also read:
 
-- `vault-themes/theme_manager.py`
+- `vault-themes/brand/brand-guide.md`
+- `vault-themes/brand/tokens/tokens.ts`
 
-Treat these files as the shared VaultWares source of truth. Re-check them whenever the submodule changes or when a task touches cross-repo product rules.
+Treat `vault-themes` as the shared VaultWares source of truth. Do not copy its
+rules into this repo unless a tool-specific file requires a short pointer.
 <!-- VAULT-THEMES-SUBMODULE:END -->
