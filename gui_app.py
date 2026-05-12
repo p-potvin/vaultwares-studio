@@ -3,10 +3,9 @@ import json
 import os
 import subprocess
 import sys
-import shutil
 import threading
 from pathlib import Path
-from PySide6.QtCore import QObject, Qt, Signal
+from PySide6.QtCore import QObject, Qt, QSettings, Signal
 from PySide6.QtGui import QColor, QFont, QIcon, QPixmap
 from PySide6.QtWidgets import (
     QApplication,
@@ -21,6 +20,9 @@ from PySide6.QtWidgets import (
     QMainWindow,
     QProgressBar,
     QPushButton,
+    QScrollArea,
+    QSizePolicy,
+    QSplitter,
     QStackedWidget,
     QTabWidget,
     QVBoxLayout,
@@ -38,6 +40,7 @@ try:
     from qfluentwidgets import Theme
     from qfluentwidgets import setTheme  # type: ignore[assignment]
     from qfluentwidgets import setThemeColor  # type: ignore[assignment]
+    from qfluentwidgets import InfoBar, InfoBarPosition
 except ImportError:
     from PySide6.QtWidgets import QTextEdit as TextEdit
 
@@ -138,17 +141,212 @@ def _detect_os_theme() -> str:
         return "dark"
 
 
+_settings = QSettings("VaultWares", "USDPlayground")
 _tm = VaultThemeManager()
-_active_theme: VaultTheme = _tm.get_theme_by_name(
-    "Solarized Light Revisited" if _detect_os_theme() == "light" else "Golden Slate"
-)
-
-
-def build_stylesheet(theme: VaultTheme) -> str:
-    return (
-        f"QWidget {{ background: {theme.background}; color: {theme.text_primary}; }}"
-        f" QFrame {{ background: {theme.surface}; }}"
+_saved_theme_name = _settings.value("theme", None)
+if _saved_theme_name:
+    _active_theme_result = _tm.get_theme_by_name(str(_saved_theme_name))
+    _active_theme = _active_theme_result if _active_theme_result else _tm.get_theme("Golden Slate")
+else:
+    _active_theme_result = _tm.get_theme_by_name(
+        "Solarized Light Revisited" if _detect_os_theme() == "light" else "Golden Slate"
     )
+    _active_theme = _active_theme_result if _active_theme_result else _tm.get_theme("Golden Slate")
+
+
+def build_stylesheet(theme: VaultTheme) -> str:  # noqa: PLR0914
+    bg = theme.background
+    surface = theme.surface
+    surface_alt = theme.surface_alt
+    surface_el = theme.surface_elevated
+    text = theme.text_primary
+    text_sec = theme.text_secondary
+    text_mut = theme.text_muted
+    text_inv = theme.text_inverse
+    accent = theme.accent
+    accent_m = theme.accent_muted
+    border = theme.border
+    muted = theme.muted
+    return f"""
+QWidget {{
+    background: {bg};
+    color: {text};
+    font-family: "Segoe UI Semilight", "Segoe UI", "Inter", system-ui, sans-serif;
+    font-size: 10pt;
+}}
+QMainWindow, QDialog {{ background: {bg}; }}
+QFrame {{
+    background: {surface};
+    border: none;
+    border-radius: 0px;
+}}
+/* ── Scroll areas ──────────────────────────── */
+QScrollArea {{
+    background: transparent;
+    border: none;
+}}
+QScrollArea > QWidget, QScrollArea > QWidget > QWidget {{
+    background: transparent;
+}}
+/* ── Scroll bars ───────────────────────────── */
+QScrollBar:vertical {{
+    background: {surface_alt};
+    width: 8px;
+    border-radius: 4px;
+    margin: 0;
+}}
+QScrollBar::handle:vertical {{
+    background: {muted};
+    border-radius: 4px;
+    min-height: 24px;
+}}
+QScrollBar::handle:vertical:hover {{ background: {accent}; }}
+QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical,
+QScrollBar::add-page:vertical, QScrollBar::sub-page:vertical {{
+    background: none; height: 0; width: 0;
+}}
+QScrollBar:horizontal {{
+    background: {surface_alt};
+    height: 8px;
+    border-radius: 4px;
+    margin: 0;
+}}
+QScrollBar::handle:horizontal {{
+    background: {muted};
+    border-radius: 4px;
+    min-width: 24px;
+}}
+QScrollBar::handle:horizontal:hover {{ background: {accent}; }}
+QScrollBar::add-line:horizontal, QScrollBar::sub-line:horizontal,
+QScrollBar::add-page:horizontal, QScrollBar::sub-page:horizontal {{
+    background: none; height: 0; width: 0;
+}}
+/* ── Push buttons ──────────────────────────── */
+QPushButton {{
+    background: {surface_el};
+    color: {text};
+    border: 1px solid {border};
+    border-radius: 6px;
+    padding: 7px 16px;
+    font-size: 10pt;
+    min-height: 32px;
+}}
+QPushButton:hover {{
+    background: {accent};
+    color: {text_inv};
+    border-color: {accent};
+}}
+QPushButton:pressed {{
+    background: {accent_m};
+    color: {text_inv};
+}}
+QPushButton:disabled {{
+    background: {surface_alt};
+    color: {muted};
+    border-color: {border};
+}}
+/* ── Line edits ────────────────────────────── */
+QLineEdit {{
+    background: {surface_el};
+    color: {text};
+    border: 1px solid {border};
+    border-radius: 6px;
+    padding: 8px 12px;
+    font-size: 10pt;
+    min-height: 36px;
+    selection-background-color: {accent};
+    selection-color: {text_inv};
+}}
+QLineEdit:focus {{ border: 1px solid {accent}; }}
+/* ── Text edits (log view) ─────────────────── */
+QTextEdit {{
+    background: {surface_el};
+    color: {text};
+    border: 1px solid {border};
+    border-radius: 6px;
+    padding: 8px;
+    font-family: "Consolas", "Cascadia Code", "Courier New", monospace;
+    font-size: 9pt;
+    selection-background-color: {accent};
+    selection-color: {text_inv};
+}}
+QTextEdit:focus {{ border: 1px solid {accent}; }}
+/* ── List widget ───────────────────────────── */
+QListWidget {{
+    background: {surface_el};
+    color: {text};
+    border: 1px solid {border};
+    border-radius: 6px;
+    padding: 4px;
+    outline: none;
+}}
+QListWidget::item {{
+    padding: 8px 12px;
+    border-radius: 4px;
+    color: {text};
+}}
+QListWidget::item:hover {{ background: {surface_alt}; }}
+QListWidget::item:selected {{ background: {accent}; color: {text_inv}; }}
+/* ── Combo box ─────────────────────────────── */
+QComboBox {{
+    background: {surface_el};
+    color: {text};
+    border: 1px solid {border};
+    border-radius: 6px;
+    padding: 6px 12px;
+    min-height: 32px;
+    font-size: 10pt;
+}}
+QComboBox:hover, QComboBox:focus {{ border: 1px solid {accent}; }}
+QComboBox::drop-down {{
+    border: none;
+    width: 24px;
+    border-left: 1px solid {border};
+}}
+QComboBox QAbstractItemView {{
+    background: {surface_el};
+    color: {text};
+    border: 1px solid {border};
+    border-radius: 4px;
+    selection-background-color: {accent};
+    selection-color: {text_inv};
+    padding: 4px;
+    outline: none;
+}}
+/* ── Progress bar ──────────────────────────── */
+QProgressBar {{
+    background: {surface_alt};
+    border: none;
+    border-radius: 4px;
+    max-height: 6px;
+    min-height: 6px;
+}}
+QProgressBar::chunk {{ background: {accent}; border-radius: 4px; }}
+/* ── Labels ────────────────────────────────── */
+QLabel {{ background: transparent; color: {text}; }}
+/* ── Splitter ──────────────────────────────── */
+QSplitter::handle {{ background: {border}; }}
+QSplitter::handle:horizontal {{ width: 4px; margin: 2px 0; }}
+QSplitter::handle:vertical   {{ height: 4px; margin: 0 2px; }}
+QSplitter::handle:hover      {{ background: {accent_m}; }}
+/* ── Tab widget (fallback) ─────────────────── */
+QTabWidget::pane {{
+    border: 1px solid {border};
+    border-radius: 8px;
+    background: {surface};
+}}
+QTabBar::tab {{
+    background: {surface_alt};
+    color: {text_sec};
+    padding: 8px 20px;
+    border-top-left-radius: 6px;
+    border-top-right-radius: 6px;
+    border: 1px solid {border};
+    margin-right: 2px;
+}}
+QTabBar::tab:selected {{ background: {surface}; color: {text}; border-bottom-color: {surface}; }}
+QTabBar::tab:hover    {{ background: {surface_el}; color: {text}; }}
+"""
 
 
 def card_style(theme: VaultTheme) -> str:
@@ -196,10 +394,82 @@ STATE_LABELS = {
 }
 
 
+# ── Localisation (EN / QC French) ────────────────────────────────────────────
+_active_lang: str = str(_settings.value("general/lang", "EN"))
+_STRINGS: dict[str, dict[str, str]] = {
+    "app_title":             {"EN": "Digital Twin Studio",                    "QC": "Studio de jumeau numérique"},
+    "tab_studio":            {"EN": "Studio",                                  "QC": "Studio"},
+    "tab_settings":          {"EN": "Settings",                                "QC": "Paramètres"},
+    "current_job":           {"EN": "Current Job",                             "QC": "Travail actuel"},
+    "source_video":          {"EN": "Source Video",                            "QC": "Vidéo source"},
+    "choose_video":          {"EN": "Choose Video",                            "QC": "Choisir une vidéo"},
+    "use_demo_video":        {"EN": "Use Demo Video",                          "QC": "Vidéo de démonstration"},
+    "open_latest_job":       {"EN": "Open Latest Job",                         "QC": "Dernier travail"},
+    "open_manifest":         {"EN": "Open Job Manifest",                       "QC": "Ouvrir le manifeste"},
+    "job_steps":             {"EN": "Job Steps",                               "QC": "Étapes du travail"},
+    "run_full_job":          {"EN": "Run Full Job",                            "QC": "Exécuter tout le travail"},
+    "run_selected_step":     {"EN": "Run Selected Step",                       "QC": "Exécuter l'étape"},
+    "open_job_folder":       {"EN": "Open Job Folder",                         "QC": "Ouvrir le dossier"},
+    "run_state":             {"EN": "Run State",                               "QC": "État d'exécution"},
+    "prompt_camera":         {"EN": "Prompt Camera Director",                  "QC": "Inviter le directeur de caméra"},
+    "save_prompt":           {"EN": "Save Prompt",                             "QC": "Enregistrer l'invite"},
+    "stage_previews":        {"EN": "Stage Previews",                          "QC": "Aperçus de l'étape"},
+    "artifacts":             {"EN": "Artifacts",                               "QC": "Artéfacts"},
+    "run_log":               {"EN": "Run Log",                                 "QC": "Journal d'exécution"},
+    "clear_log":             {"EN": "Clear",                                   "QC": "Effacer"},
+    "return_to_finish":      {"EN": "Return to Final Review",                  "QC": "Retour à la révision finale"},
+    "final_review":          {"EN": "Final Review",                            "QC": "Révision finale"},
+    "open_walkthrough":      {"EN": "Open Walkthrough Video",                  "QC": "Vidéo de visite guidée"},
+    "open_3d_viewer":        {"EN": "Open Live 3D Viewer",                     "QC": "Visualiseur 3D en direct"},
+    "open_output_folder":    {"EN": "Open Output Folder",                      "QC": "Dossier de sortie"},
+    "integration":           {"EN": "VaultWares Integration",                  "QC": "Intégration VaultWares"},
+    "api_url_label":         {"EN": "API Base URL",                            "QC": "URL de base de l'API"},
+    "app_url_label":         {"EN": "App URL (Vault Flows)",                   "QC": "URL de l'application"},
+    "bearer_label":          {"EN": "Bearer Token (optional)",                 "QC": "Jeton porteur (optionnel)"},
+    "api_key_label":         {"EN": "API Key (optional)",                      "QC": "Clé API (optionnelle)"},
+    "test_api":              {"EN": "Test API",                                "QC": "Tester l'API"},
+    "export_workflow":       {"EN": "Export Workflow JSON",                    "QC": "Exporter le flux JSON"},
+    "push_workflow":         {"EN": "Push Workflow",                           "QC": "Pousser le flux de travail"},
+    "open_vault_flows":      {"EN": "Open Vault Flows",                        "QC": "Ouvrir Vault Flows"},
+    "inspect_steps":         {"EN": "Inspect Previous Steps",                  "QC": "Inspecter les étapes précédentes"},
+    "inspect_note":          {"EN": "The step rail remains live. Click any earlier step to reopen its viewer, previews, logs, and artifacts.",
+                              "QC": "Le rail d'étapes reste actif. Cliquez sur une étape précédente pour rouvrir son visualiseur, ses aperçus, ses journaux et ses artéfacts."},
+    "execution_mode_safe":   {"EN": "Execution mode: fallback-safe for local hardware.",
+                              "QC": "Mode d'exécution : sécurisé pour le matériel local."},
+    "execution_mode_strict": {"EN": "Execution mode: strict. Missing heavy tools fail the active stage.",
+                              "QC": "Mode strict : les outils manquants font échouer l'étape active."},
+    "enable_strict":         {"EN": "Enable Strict Tool Mode",                 "QC": "Activer le mode strict"},
+    "disable_strict":        {"EN": "Disable Strict Tool Mode",                "QC": "Désactiver le mode strict"},
+    "refresh_health":        {"EN": "Refresh Dependency Health",               "QC": "Vérifier les dépendances"},
+    "health_title":          {"EN": "Dependency Health",                       "QC": "État des dépendances"},
+    "theme_label":           {"EN": "Theme",                                   "QC": "Thème"},
+    "preview_pending":       {"EN": "Preview pending",                         "QC": "Aperçu en attente"},
+    "finish_summary":        {"EN": "The digital twin job completed. Open the final walkthrough video, launch the optional live 3D viewer, or inspect any previous step from the rail.",
+                              "QC": "Le travail de jumeau numérique est terminé. Ouvrez la vidéo de visite finale, lancez le visualiseur 3D optionnel, ou inspectez une étape précédente."},
+    "ready_to_execute":      {"EN": "Ready to execute the selected stage.",
+                              "QC": "Prêt à exécuter l'étape sélectionnée."},
+    "complete_earlier":      {"EN": "Complete earlier stages first, or use Run Full Job.",
+                              "QC": "Terminez d'abord les étapes précédentes, ou utilisez Exécuter tout le travail."},
+    "lang_switch_label":     {"EN": "FR",                                      "QC": "EN"},
+    "no_video_yet":          {"EN": "No walkthrough video has been generated yet.",
+                              "QC": "Aucune vidéo de visite n'a encore été générée."},
+    "strict_off":            {"EN": "Strict mode: OFF",                        "QC": "Mode strict : OFF"},
+    "strict_on":             {"EN": "Strict mode: ON",                         "QC": "Mode strict : ON"},
+}
+
+
+def _t(key: str) -> str:
+    """Return the localised UI string for the currently active language."""
+    entry = _STRINGS.get(key, {})
+    return entry.get(_active_lang, entry.get("EN", key))
+
+
+
 class TaskSignals(QObject):
     log = Signal(str)
     manifest_changed = Signal(object)
     running_changed = Signal(bool)
+    api_test_finished = Signal(bool, str)
 
 
 def _open_path(path: Path) -> None:
@@ -216,38 +486,55 @@ class SettingsTab(QFrame):
         super().__init__(parent=parent)
         self.setObjectName("Settings")
         self.setStyleSheet(card_style(_active_theme))
+        self._strict_mode: bool = str(_settings.value("general/strict_mode", "false")).lower() == "true"
 
-        layout = QVBoxLayout(self)
-        layout.setContentsMargins(18, 18, 18, 18)
-        layout.setSpacing(14)
+        outer = QVBoxLayout(self)
+        outer.setContentsMargins(0, 0, 0, 0)
+        outer.setSpacing(0)
 
-        title = SubtitleLabel("Settings", self)
-        layout.addWidget(title)
+        scroll = QScrollArea(self)
+        scroll.setWidgetResizable(True)
+        scroll.setFrameShape(QFrame.Shape.NoFrame)
+        scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        outer.addWidget(scroll)
 
-        self.mode_label = BodyLabel("Execution mode: fallback-safe for local hardware.", self)
+        inner = QWidget()
+        scroll.setWidget(inner)
+        layout = QVBoxLayout(inner)
+        layout.setContentsMargins(24, 24, 24, 24)
+        layout.setSpacing(16)
+
+        self.settings_title = SubtitleLabel(_t("tab_settings"), inner)
+        layout.addWidget(self.settings_title)
+
+        self.mode_label = BodyLabel("Execution mode: fallback-safe for local hardware.", inner)
         self.mode_label.setWordWrap(True)
         layout.addWidget(self.mode_label)
 
-        self.toggle_btn = PrimaryPushButton(FIF.SETTING, "Enable Strict Tool Mode", self)
+        self.toggle_btn = PrimaryPushButton(FIF.SETTING, _t("disable_strict") if self._strict_mode else _t("enable_strict"), inner)
         layout.addWidget(self.toggle_btn)
 
-        self.refresh_btn = PrimaryPushButton(FIF.SYNC, "Refresh Dependency Health", self)
+        self.refresh_btn = PrimaryPushButton(FIF.SYNC, _t("refresh_health"), inner)
         layout.addWidget(self.refresh_btn)
 
-        self.health_view = TextEdit(self)
+        self.health_title_label = SubtitleLabel(_t("health_title"), inner)
+        layout.addWidget(self.health_title_label)
+
+        self.health_view = TextEdit(inner)
         self.health_view.setReadOnly(True)
+        self.health_view.setMinimumHeight(180)
         layout.addWidget(self.health_view)
 
         # --- theme picker ---
         theme_row = QHBoxLayout()
-        theme_label = BodyLabel("Theme:", self)
-        theme_row.addWidget(theme_label)
-        self.theme_combo = ComboBox(self)
+        self.theme_label_widget = BodyLabel(_t("theme_label"), inner)
+        theme_row.addWidget(self.theme_label_widget)
+        self.theme_combo = ComboBox(inner)
         for t in _tm.get_themes():
             self.theme_combo.addItem(t.name)
         self.theme_combo.setCurrentText(_active_theme.name)
         theme_row.addWidget(self.theme_combo, 1)
-        self.theme_swatch = QFrame(self)
+        self.theme_swatch = QFrame(inner)
         self.theme_swatch.setFixedSize(24, 24)
         self.theme_swatch.setStyleSheet(
             f"background: {_active_theme.accent}; border-radius: 4px;"
@@ -256,17 +543,19 @@ class SettingsTab(QFrame):
         layout.addLayout(theme_row)
         # --- end theme picker ---
 
+        layout.addStretch(1)
         self.refresh_btn.clicked.connect(self.refresh_dependency_health)
         self.theme_combo.currentIndexChanged.connect(self._on_theme_changed)
         self.refresh_dependency_health()
 
     def set_mode(self, strict_mode: bool) -> None:
+        self._strict_mode = strict_mode
         if strict_mode:
             self.mode_label.setText("Execution mode: strict. Missing heavy tools fail the active stage.")
-            self.toggle_btn.setText("Disable Strict Tool Mode")
+            self.toggle_btn.setText(_t("disable_strict"))
         else:
             self.mode_label.setText("Execution mode: fallback-safe for local hardware.")
-            self.toggle_btn.setText("Enable Strict Tool Mode")
+            self.toggle_btn.setText(_t("enable_strict"))
 
     def refresh_dependency_health(self) -> None:
         lines: list[str] = []
@@ -281,8 +570,19 @@ class SettingsTab(QFrame):
         )
         self.theme_changed.emit(theme)
 
+    def retranslate(self) -> None:
+        """Re-apply localised strings after a language switch."""
+        self.settings_title.setText(_t("tab_settings"))
+        self.toggle_btn.setText(_t("disable_strict") if self._strict_mode else _t("enable_strict"))
+        self.refresh_btn.setText(_t("refresh_health"))
+        self.health_title_label.setText(_t("health_title"))
+        self.theme_label_widget.setText(_t("theme_label"))
+
 
 class DashboardWidget(QFrame):
+    theme_changed = Signal(object)
+    lang_changed = Signal(str)
+
     def __init__(self, parent: QWidget | None = None):
         super().__init__(parent=parent)
         self.setObjectName("Dashboard")
@@ -290,8 +590,9 @@ class DashboardWidget(QFrame):
         self.signals.log.connect(self._append_log)
         self.signals.manifest_changed.connect(self._on_manifest_changed)
         self.signals.running_changed.connect(self._set_running)
+        self.signals.api_test_finished.connect(self._on_api_test_finished)
 
-        self.strict_mode = False
+        self.strict_mode = str(_settings.value("general/strict_mode", "false")).lower() == "true"
         self.is_running = False
         self.show_finish_panel = False
         self.manifest = create_job_manifest(DEFAULT_SOURCE_VIDEO)
@@ -299,39 +600,45 @@ class DashboardWidget(QFrame):
         self._normal_cards: list[QFrame] = []
         self._accent_cards: list[QFrame] = []
 
-        root_layout = QHBoxLayout(self)
-        root_layout.setContentsMargins(16, 16, 16, 16)
-        root_layout.setSpacing(16)
+        root_layout = QVBoxLayout(self)
+        root_layout.setContentsMargins(0, 0, 0, 0)
+        root_layout.setSpacing(0)
 
+        root_layout.addWidget(self._build_header())
+
+        self._main_splitter = QSplitter(Qt.Orientation.Horizontal, self)
+        self._main_splitter.setChildrenCollapsible(False)
         self.left_column = self._build_left_column()
         self.right_column = self._build_right_column()
-        root_layout.addWidget(self.left_column, 0)
-        root_layout.addWidget(self.right_column, 1)
+        self._main_splitter.addWidget(self.left_column)
+        self._main_splitter.addWidget(self.right_column)
+        self._main_splitter.setSizes([300, 900])
+        root_layout.addWidget(self._main_splitter, 1)
 
         self._render_manifest()
         self._append_log(f"Studio initialized for {self.manifest.source_video}")
 
     def _build_left_column(self) -> QWidget:
-        container = QWidget(self)
-        container.setFixedWidth(320)
-        layout = QVBoxLayout(container)
-        layout.setContentsMargins(0, 0, 0, 0)
+        inner = QWidget()
+        layout = QVBoxLayout(inner)
+        layout.setContentsMargins(16, 16, 16, 16)
         layout.setSpacing(14)
 
-        job_card = QFrame(container)
+        job_card = QFrame(inner)
         job_card.setStyleSheet(accent_card_style(_active_theme))
         self._accent_cards.append(job_card)
         job_layout = QVBoxLayout(job_card)
         job_layout.setContentsMargins(18, 18, 18, 18)
-        self.job_title = SubtitleLabel("Current Job", job_card)
+        job_layout.setSpacing(8)
+        self.job_title = SubtitleLabel(_t("current_job"), job_card)
         self.job_meta = BodyLabel("", job_card)
         self.job_meta.setWordWrap(True)
         self.source_video_label = BodyLabel("", job_card)
         self.source_video_label.setWordWrap(True)
-        self.pick_video_btn = PrimaryPushButton(FIF.FOLDER, "Choose Video", job_card)
-        self.use_demo_btn = PrimaryPushButton(FIF.VIDEO, "Use Demo Video", job_card)
-        self.open_latest_job_btn = PrimaryPushButton(FIF.SYNC, "Open Latest Job", job_card)
-        self.open_manifest_btn = PrimaryPushButton(FIF.FOLDER, "Open Job Manifest", job_card)
+        self.pick_video_btn = PrimaryPushButton(FIF.FOLDER, _t("choose_video"), job_card)
+        self.use_demo_btn = PrimaryPushButton(FIF.VIDEO, _t("use_demo_video"), job_card)
+        self.open_latest_job_btn = PrimaryPushButton(FIF.SYNC, _t("open_latest_job"), job_card)
+        self.open_manifest_btn = PrimaryPushButton(FIF.FOLDER, _t("open_manifest"), job_card)
         job_layout.addWidget(self.job_title)
         job_layout.addWidget(self.job_meta)
         job_layout.addWidget(self.source_video_label)
@@ -341,28 +648,33 @@ class DashboardWidget(QFrame):
         job_layout.addWidget(self.open_manifest_btn)
         layout.addWidget(job_card)
 
-        stages_card = QFrame(container)
+        stages_card = QFrame(inner)
         stages_card.setStyleSheet(card_style(_active_theme))
         self._normal_cards.append(stages_card)
         stages_layout = QVBoxLayout(stages_card)
         stages_layout.setContentsMargins(18, 18, 18, 18)
-        stages_layout.addWidget(SubtitleLabel("Job Steps", stages_card))
+        self.stages_label = SubtitleLabel(_t("job_steps"), stages_card)
+        stages_layout.addWidget(self.stages_label)
         self.stage_list = QListWidget(stages_card)
+        self.stage_list.setMinimumHeight(180)
         stages_layout.addWidget(self.stage_list)
-        layout.addWidget(stages_card, 1)
+        layout.addWidget(stages_card)
 
-        actions_card = QFrame(container)
+        actions_card = QFrame(inner)
         actions_card.setStyleSheet(card_style(_active_theme))
         self._normal_cards.append(actions_card)
         actions_layout = QVBoxLayout(actions_card)
         actions_layout.setContentsMargins(18, 18, 18, 18)
-        self.run_full_job_btn = PrimaryPushButton(FIF.PLAY_SOLID, "Run Full Job", actions_card)
-        self.run_stage_btn = PrimaryPushButton(FIF.PLAY, "Run Selected Step", actions_card)
-        self.open_job_folder_btn = PrimaryPushButton(FIF.FOLDER, "Open Job Folder", actions_card)
+        actions_layout.setSpacing(8)
+        self.run_full_job_btn = PrimaryPushButton(FIF.PLAY_SOLID, _t("run_full_job"), actions_card)
+        self.run_stage_btn = PrimaryPushButton(FIF.PLAY, _t("run_selected_step"), actions_card)
+        self.open_job_folder_btn = PrimaryPushButton(FIF.FOLDER, _t("open_job_folder"), actions_card)
         actions_layout.addWidget(self.run_full_job_btn)
         actions_layout.addWidget(self.run_stage_btn)
         actions_layout.addWidget(self.open_job_folder_btn)
         layout.addWidget(actions_card)
+
+        layout.addStretch(1)
 
         self.pick_video_btn.clicked.connect(self._pick_video)
         self.use_demo_btn.clicked.connect(self._use_demo_video)
@@ -372,12 +684,20 @@ class DashboardWidget(QFrame):
         self.run_stage_btn.clicked.connect(self._run_selected_stage)
         self.run_full_job_btn.clicked.connect(self._run_full_job)
         self.open_job_folder_btn.clicked.connect(lambda: _open_path(Path(self.manifest.output_dir)))
-        return container
+
+        scroll = QScrollArea(self)
+        scroll.setWidgetResizable(True)
+        scroll.setFrameShape(QFrame.Shape.NoFrame)
+        scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        scroll.setMinimumWidth(240)
+        scroll.setMaximumWidth(420)
+        scroll.setWidget(inner)
+        return scroll
 
     def _build_right_column(self) -> QWidget:
         container = QWidget(self)
         layout = QVBoxLayout(container)
-        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setContentsMargins(16, 16, 16, 16)
         layout.setSpacing(14)
 
         self.state_card = QFrame(container)
@@ -386,7 +706,7 @@ class DashboardWidget(QFrame):
         state_layout = QGridLayout(self.state_card)
         state_layout.setContentsMargins(18, 18, 18, 18)
         state_layout.setHorizontalSpacing(18)
-        self.state_title = SubtitleLabel("Run State", self.state_card)
+        self.state_title = SubtitleLabel(_t("run_state"), self.state_card)
         self.state_message = BodyLabel("", self.state_card)
         self.state_message.setWordWrap(True)
         self.progress_label = BodyLabel("", self.state_card)
@@ -399,19 +719,34 @@ class DashboardWidget(QFrame):
         state_layout.addWidget(self.progress_bar, 2, 0, 1, 2)
         layout.addWidget(self.state_card)
 
-        self.viewer_stack = QStackedWidget(container)
+        self.right_tabs = QTabWidget(container)
+        
+        self.viewer_stack = QStackedWidget()
         self.step_page = self._build_step_page()
         self.finish_page = self._build_finish_page()
         self.viewer_stack.addWidget(self.step_page)
         self.viewer_stack.addWidget(self.finish_page)
-        layout.addWidget(self.viewer_stack, 1)
+        
+        self.right_tabs.addTab(self.viewer_stack, _t("tab_studio"))
+        
+        self.integration_page = self._build_integration_page()
+        self.right_tabs.addTab(self.integration_page, _t("integration"))
+        
+        log_panel = self._build_log_panel()
+        self.right_tabs.addTab(log_panel, _t("run_log"))
 
+        layout.addWidget(self.right_tabs, 1)
         return container
 
     def _build_step_page(self) -> QWidget:
-        page = QWidget(self)
+        scroll = QScrollArea(self)
+        scroll.setWidgetResizable(True)
+        scroll.setFrameShape(QFrame.Shape.NoFrame)
+        scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+
+        page = QWidget()
         layout = QVBoxLayout(page)
-        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setContentsMargins(0, 4, 8, 4)
         layout.setSpacing(14)
 
         summary_card = QFrame(page)
@@ -434,10 +769,13 @@ class DashboardWidget(QFrame):
         self._normal_cards.append(prompt_card)
         prompt_layout = QVBoxLayout(prompt_card)
         prompt_layout.setContentsMargins(18, 18, 18, 18)
-        prompt_layout.addWidget(SubtitleLabel("Prompt Camera Director", prompt_card))
+        prompt_layout.setSpacing(10)
+        self.prompt_label = SubtitleLabel(_t("prompt_camera"), prompt_card)
+        prompt_layout.addWidget(self.prompt_label)
         self.camera_prompt_edit = QLineEdit(prompt_card)
-        self.camera_prompt_edit.setText(DEFAULT_CAMERA_PROMPT)
-        self.camera_prompt_save_btn = PrimaryPushButton(FIF.SAVE, "Save Prompt", prompt_card)
+        self.camera_prompt_edit.setText(str(_settings.value("general/camera_prompt", DEFAULT_CAMERA_PROMPT)))
+        self.camera_prompt_edit.textChanged.connect(lambda txt: _settings.setValue("general/camera_prompt", txt))
+        self.camera_prompt_save_btn = PrimaryPushButton(FIF.SAVE, _t("save_prompt"), prompt_card)
         prompt_layout.addWidget(self.camera_prompt_edit)
         prompt_layout.addWidget(self.camera_prompt_save_btn)
         layout.addWidget(prompt_card)
@@ -448,11 +786,12 @@ class DashboardWidget(QFrame):
         self._normal_cards.append(preview_card)
         preview_layout = QVBoxLayout(preview_card)
         preview_layout.setContentsMargins(18, 18, 18, 18)
-        preview_layout.addWidget(SubtitleLabel("Stage Previews", preview_card))
+        self.previews_label = SubtitleLabel(_t("stage_previews"), preview_card)
+        preview_layout.addWidget(self.previews_label)
         preview_grid = QHBoxLayout()
         self.preview_labels: list[QLabel] = []
         for _ in range(3):
-            label = QLabel("Preview pending", preview_card)
+            label = QLabel(_t("preview_pending"), preview_card)
             label.setAlignment(Qt.AlignmentFlag.AlignCenter)
             label.setWordWrap(True)
             label.setStyleSheet(preview_style(_active_theme))
@@ -466,32 +805,26 @@ class DashboardWidget(QFrame):
         self._normal_cards.append(artifact_card)
         artifact_layout = QVBoxLayout(artifact_card)
         artifact_layout.setContentsMargins(18, 18, 18, 18)
-        artifact_layout.addWidget(SubtitleLabel("Artifacts", artifact_card))
+        self.artifacts_label = SubtitleLabel(_t("artifacts"), artifact_card)
+        artifact_layout.addWidget(self.artifacts_label)
         self.artifact_buttons_layout = QHBoxLayout()
         artifact_layout.addLayout(self.artifact_buttons_layout)
         layout.addWidget(artifact_card)
 
-        log_card = QFrame(page)
-        log_card.setStyleSheet(card_style(_active_theme))
-        self._normal_cards.append(log_card)
-        log_layout = QVBoxLayout(log_card)
-        log_layout.setContentsMargins(18, 18, 18, 18)
-        log_layout.addWidget(SubtitleLabel("Run Log", log_card))
-        self.log_view = TextEdit(log_card)
-        self.log_view.setReadOnly(True)
-        log_layout.addWidget(self.log_view)
-        self.return_to_finish_btn = PrimaryPushButton(FIF.ACCEPT, "Return to Final Review", log_card)
-        log_layout.addWidget(self.return_to_finish_btn)
-        layout.addWidget(log_card, 1)
-
+        layout.addStretch(1)
         self.camera_prompt_save_btn.clicked.connect(self._save_camera_prompt)
-        self.return_to_finish_btn.clicked.connect(self._show_finish_panel)
-        return page
+        scroll.setWidget(page)
+        return scroll
 
     def _build_finish_page(self) -> QWidget:
-        page = QWidget(self)
+        scroll = QScrollArea(self)
+        scroll.setWidgetResizable(True)
+        scroll.setFrameShape(QFrame.Shape.NoFrame)
+        scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+
+        page = QWidget()
         layout = QVBoxLayout(page)
-        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setContentsMargins(0, 4, 8, 4)
         layout.setSpacing(14)
 
         finish_card = QFrame(page)
@@ -499,78 +832,230 @@ class DashboardWidget(QFrame):
         self._normal_cards.append(finish_card)
         finish_layout = QVBoxLayout(finish_card)
         finish_layout.setContentsMargins(18, 18, 18, 18)
-        finish_layout.addWidget(SubtitleLabel("Final Review", finish_card))
+        finish_layout.setSpacing(12)
+        self.finish_label = SubtitleLabel(_t("final_review"), finish_card)
+        finish_layout.addWidget(self.finish_label)
         self.finish_summary = BodyLabel("", finish_card)
         self.finish_summary.setWordWrap(True)
         finish_layout.addWidget(self.finish_summary)
 
         buttons_row = QHBoxLayout()
-        self.open_video_btn = PrimaryPushButton(FIF.VIDEO, "Open Walkthrough Video", finish_card)
-        self.open_viewer_btn = PrimaryPushButton(FIF.APPLICATION, "Open Live 3D Viewer", finish_card)
-        self.open_outputs_btn = PrimaryPushButton(FIF.FOLDER, "Open Output Folder", finish_card)
+        self.open_video_btn = PrimaryPushButton(FIF.VIDEO, _t("open_walkthrough"), finish_card)
+        self.open_viewer_btn = PrimaryPushButton(FIF.APPLICATION, _t("open_3d_viewer"), finish_card)
+        self.open_outputs_btn = PrimaryPushButton(FIF.FOLDER, _t("open_output_folder"), finish_card)
         buttons_row.addWidget(self.open_video_btn)
         buttons_row.addWidget(self.open_viewer_btn)
         buttons_row.addWidget(self.open_outputs_btn)
         finish_layout.addLayout(buttons_row)
         layout.addWidget(finish_card)
 
+        detail_card = QFrame(page)
+        detail_card.setStyleSheet(card_style(_active_theme))
+        self._normal_cards.append(detail_card)
+        detail_layout = QVBoxLayout(detail_card)
+        detail_layout.setContentsMargins(18, 18, 18, 18)
+        self.inspect_label = SubtitleLabel(_t("inspect_steps"), detail_card)
+        detail_layout.addWidget(self.inspect_label)
+        note = BodyLabel(_t("inspect_note"), detail_card)
+        note.setWordWrap(True)
+        detail_layout.addWidget(note)
+        layout.addWidget(detail_card)
+
+        layout.addStretch(1)
+        self.open_video_btn.clicked.connect(self._open_walkthrough_video)
+        self.open_viewer_btn.clicked.connect(self._open_live_viewer)
+        self.open_outputs_btn.clicked.connect(lambda: _open_path(Path(self.manifest.output_dir)))
+        scroll.setWidget(page)
+        return scroll
+
+    def _build_integration_page(self) -> QWidget:
+        scroll = QScrollArea(self)
+        scroll.setWidgetResizable(True)
+        scroll.setFrameShape(QFrame.Shape.NoFrame)
+        scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+
+        page = QWidget()
+        layout = QVBoxLayout(page)
+        layout.setContentsMargins(0, 4, 8, 4)
+        layout.setSpacing(14)
+
         integration_card = QFrame(page)
         integration_card.setStyleSheet(card_style(_active_theme))
         self._normal_cards.append(integration_card)
         integration_layout = QVBoxLayout(integration_card)
         integration_layout.setContentsMargins(18, 18, 18, 18)
-        integration_layout.addWidget(SubtitleLabel("VaultWares Integration", integration_card))
+        integration_layout.setSpacing(8)
+        self.integration_label = SubtitleLabel(_t("integration"), integration_card)
+        integration_layout.addWidget(self.integration_label)
+        self.api_url_label_widget = QLabel(_t("api_url_label"), integration_card)
+        integration_layout.addWidget(self.api_url_label_widget)
         self.api_base_edit = QLineEdit(integration_card)
         self.api_base_edit.setText("https://localhost:8000")
         self.api_base_edit.setPlaceholderText("Vaultwares Pipelines API base URL")
+        self.api_base_edit.setMinimumWidth(200)
+        self.api_base_edit.setSizePolicy(QSizePolicy.Policy.MinimumExpanding, QSizePolicy.Policy.Fixed)
+        integration_layout.addWidget(self.api_base_edit)
+        self.app_url_label_widget = QLabel(_t("app_url_label"), integration_card)
+        integration_layout.addWidget(self.app_url_label_widget)
         self.app_url_edit = QLineEdit(integration_card)
         self.app_url_edit.setText("https://localhost:5174")
         self.app_url_edit.setPlaceholderText("Vault Flows app URL")
+        self.app_url_edit.setMinimumWidth(200)
+        self.app_url_edit.setSizePolicy(QSizePolicy.Policy.MinimumExpanding, QSizePolicy.Policy.Fixed)
+        integration_layout.addWidget(self.app_url_edit)
+        self.bearer_label_widget = QLabel(_t("bearer_label"), integration_card)
+        integration_layout.addWidget(self.bearer_label_widget)
         self.bearer_token_edit = QLineEdit(integration_card)
         self.bearer_token_edit.setPlaceholderText("Bearer token (optional)")
         self.bearer_token_edit.setEchoMode(QLineEdit.EchoMode.Password)
+        self.bearer_token_edit.setMinimumWidth(200)
+        self.bearer_token_edit.setSizePolicy(QSizePolicy.Policy.MinimumExpanding, QSizePolicy.Policy.Fixed)
+        integration_layout.addWidget(self.bearer_token_edit)
+        self.api_key_label_widget = QLabel(_t("api_key_label"), integration_card)
+        integration_layout.addWidget(self.api_key_label_widget)
         self.api_key_edit = QLineEdit(integration_card)
         self.api_key_edit.setPlaceholderText("API key (optional)")
         self.api_key_edit.setEchoMode(QLineEdit.EchoMode.Password)
-        integration_layout.addWidget(self.api_base_edit)
-        integration_layout.addWidget(self.app_url_edit)
-        integration_layout.addWidget(self.bearer_token_edit)
+        self.api_key_edit.setMinimumWidth(200)
+        self.api_key_edit.setSizePolicy(QSizePolicy.Policy.MinimumExpanding, QSizePolicy.Policy.Fixed)
         integration_layout.addWidget(self.api_key_edit)
 
         integration_buttons = QHBoxLayout()
-        self.test_api_btn = PrimaryPushButton(FIF.SYNC, "Test API", integration_card)
-        self.export_workflow_btn = PrimaryPushButton(FIF.SAVE, "Export Workflow JSON", integration_card)
-        self.push_workflow_btn = PrimaryPushButton(FIF.SYNC, "Push Workflow", integration_card)
-        self.open_vault_flows_btn = PrimaryPushButton(FIF.LINK, "Open Vault Flows", integration_card)
+        self.test_api_btn = PrimaryPushButton(FIF.SYNC, _t("test_api"), integration_card)
+        self.export_workflow_btn = PrimaryPushButton(FIF.SAVE, _t("export_workflow"), integration_card)
+        self.push_workflow_btn = PrimaryPushButton(FIF.SYNC, _t("push_workflow"), integration_card)
+        self.open_vault_flows_btn = PrimaryPushButton(FIF.LINK, _t("open_vault_flows"), integration_card)
         integration_buttons.addWidget(self.test_api_btn)
         integration_buttons.addWidget(self.export_workflow_btn)
         integration_buttons.addWidget(self.push_workflow_btn)
         integration_buttons.addWidget(self.open_vault_flows_btn)
         integration_layout.addLayout(integration_buttons)
         layout.addWidget(integration_card)
-
-        detail_card = QFrame(page)
-        detail_card.setStyleSheet(card_style(_active_theme))
-        self._normal_cards.append(detail_card)
-        detail_layout = QVBoxLayout(detail_card)
-        detail_layout.setContentsMargins(18, 18, 18, 18)
-        detail_layout.addWidget(SubtitleLabel("Inspect Previous Steps", detail_card))
-        note = BodyLabel(
-            "The step rail remains live. Click any earlier step to reopen its viewer, previews, logs, and artifacts.",
-            detail_card,
-        )
-        note.setWordWrap(True)
-        detail_layout.addWidget(note)
-        layout.addWidget(detail_card)
-
-        self.open_video_btn.clicked.connect(self._open_walkthrough_video)
-        self.open_viewer_btn.clicked.connect(self._open_live_viewer)
-        self.open_outputs_btn.clicked.connect(lambda: _open_path(Path(self.manifest.output_dir)))
+        
+        layout.addStretch(1)
         self.test_api_btn.clicked.connect(self._test_live_api)
         self.export_workflow_btn.clicked.connect(self._export_workflow_package)
         self.push_workflow_btn.clicked.connect(self._push_workflow_package)
         self.open_vault_flows_btn.clicked.connect(self._open_vault_flows)
-        return page
+        
+        scroll.setWidget(page)
+        return scroll
+
+    def _build_header(self) -> QWidget:
+        self._header_frame = QFrame(self)
+        self._header_frame.setFixedHeight(52)
+        self._header_frame.setStyleSheet(
+            f"QFrame {{ background: {_active_theme.surface_elevated};"
+            f" border-bottom: 1px solid {_active_theme.border}; border-radius: 0px; }}"
+        )
+        h_layout = QHBoxLayout(self._header_frame)
+        h_layout.setContentsMargins(18, 0, 18, 0)
+        h_layout.setSpacing(12)
+        brand = QLabel("\U0001f537 USD Playground", self._header_frame)
+        brand.setStyleSheet(
+            f"color: {_active_theme.text_primary}; font-size: 15px; font-weight: 600;"
+        )
+        h_layout.addWidget(brand)
+        h_layout.addStretch(1)
+        theme_label = QLabel("Theme:", self._header_frame)
+        theme_label.setStyleSheet(
+            f"color: {_active_theme.text_secondary}; font-size: 12px;"
+        )
+        h_layout.addWidget(theme_label)
+        self.header_theme_combo = ComboBox(self._header_frame)
+        for t in _tm.get_themes():
+            self.header_theme_combo.addItem(t.name)
+        self.header_theme_combo.setCurrentText(_active_theme.name)
+        self.header_theme_combo.setFixedWidth(180)
+        h_layout.addWidget(self.header_theme_combo)
+        self.lang_btn = QPushButton("EN / QC" if _active_lang == "EN" else "QC / EN", self._header_frame)
+        self.lang_btn.setFixedWidth(80)
+        h_layout.addWidget(self.lang_btn)
+        self.header_theme_combo.currentIndexChanged.connect(self._on_header_theme_changed)
+        self.lang_btn.clicked.connect(self._toggle_language)
+        return self._header_frame
+
+    def _build_log_panel(self) -> QWidget:
+        from PySide6.QtWidgets import QTextEdit
+        panel = QFrame(self)
+        panel.setStyleSheet(card_style(_active_theme))
+        self._normal_cards.append(panel)
+        panel.setMinimumHeight(140)
+        log_layout = QVBoxLayout(panel)
+        log_layout.setContentsMargins(12, 12, 12, 12)
+        log_layout.setSpacing(6)
+        top_row = QHBoxLayout()
+        self.log_title_label = SubtitleLabel(_t("run_log"), panel)
+        top_row.addWidget(self.log_title_label)
+        top_row.addStretch(1)
+        self._clear_log_btn = QPushButton(_t("clear_log"), panel)
+        top_row.addWidget(self._clear_log_btn)
+        self.return_to_finish_btn = PrimaryPushButton(FIF.ACCEPT, _t("return_to_finish"), panel)
+        top_row.addWidget(self.return_to_finish_btn)
+        self.return_to_finish_btn.hide() # Not needed anymore
+        log_layout.addLayout(top_row)
+        self.log_view = QTextEdit(panel)
+        self.log_view.setReadOnly(True)
+        self.log_view.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByKeyboard | Qt.TextInteractionFlag.TextSelectableByMouse | Qt.TextInteractionFlag.LinksAccessibleByMouse)
+        self.log_view.setMinimumHeight(80)
+        log_layout.addWidget(self.log_view, 1)
+        self._clear_log_btn.clicked.connect(self.log_view.clear)
+        self.return_to_finish_btn.clicked.connect(self._show_finish_panel)
+        return panel
+
+    def _on_header_theme_changed(self, index: int) -> None:
+        theme = _tm.get_theme(index=index)
+        if theme is not None:
+            self.theme_changed.emit(theme)
+
+    def _toggle_language(self) -> None:
+        global _active_lang
+        _active_lang = "QC" if _active_lang == "EN" else "EN"
+        _settings.setValue("general/lang", _active_lang)
+        self.lang_btn.setText("EN / QC" if _active_lang == "EN" else "QC / EN")
+        self.retranslate()
+        self.lang_changed.emit(_active_lang)
+
+    def retranslate(self) -> None:
+        # left column
+        self.job_title.setText(_t("current_job"))
+        self.stages_label.setText(_t("job_steps"))
+        self.pick_video_btn.setText(_t("choose_video"))
+        self.use_demo_btn.setText(_t("use_demo_video"))
+        self.open_latest_job_btn.setText(_t("open_latest_job"))
+        self.open_manifest_btn.setText(_t("open_manifest"))
+        self.run_full_job_btn.setText(_t("run_full_job"))
+        self.run_stage_btn.setText(_t("run_selected_step"))
+        self.open_job_folder_btn.setText(_t("open_job_folder"))
+        # right column state card
+        self.state_title.setText(_t("run_state"))
+        # step page
+        self.prompt_label.setText(_t("prompt_camera"))
+        self.camera_prompt_save_btn.setText(_t("save_prompt"))
+        self.previews_label.setText(_t("stage_previews"))
+        self.artifacts_label.setText(_t("artifacts"))
+        for lbl in self.preview_labels:
+            if not lbl.pixmap() or lbl.pixmap().isNull():
+                lbl.setText(_t("preview_pending"))
+        # finish page
+        self.finish_label.setText(_t("final_review"))
+        self.open_video_btn.setText(_t("open_walkthrough"))
+        self.open_viewer_btn.setText(_t("open_3d_viewer"))
+        self.open_outputs_btn.setText(_t("open_output_folder"))
+        self.integration_label.setText(_t("integration"))
+        self.api_url_label_widget.setText(_t("api_url_label"))
+        self.app_url_label_widget.setText(_t("app_url_label"))
+        self.bearer_label_widget.setText(_t("bearer_label"))
+        self.api_key_label_widget.setText(_t("api_key_label"))
+        self.test_api_btn.setText(_t("test_api"))
+        self.export_workflow_btn.setText(_t("export_workflow"))
+        self.push_workflow_btn.setText(_t("push_workflow"))
+        self.open_vault_flows_btn.setText(_t("open_vault_flows"))
+        self.inspect_label.setText(_t("inspect_steps"))
+        # log panel
+        self.log_title_label.setText(_t("run_log"))
+        self._clear_log_btn.setText(_t("clear_log"))
+        self.return_to_finish_btn.setText(_t("return_to_finish"))
 
     def _append_log(self, message: str) -> None:
         self.log_view.append(message)
@@ -724,9 +1209,13 @@ class DashboardWidget(QFrame):
     def _render_selected_stage(self) -> None:
         if self.manifest.state == StageState.COMPLETE.value and self.show_finish_panel:
             self.viewer_stack.setCurrentWidget(self.finish_page)
+            self.right_tabs.setCurrentIndex(0)
+            if hasattr(self, 'return_to_finish_btn'):
+                self.return_to_finish_btn.setVisible(False)
             return
 
         stage = next(stage for stage in self.manifest.stages if stage.key == self.selected_stage_key)
+        self.right_tabs.setCurrentIndex(0)
         self.viewer_stack.setCurrentWidget(self.step_page)
         self.step_title.setText(stage.title)
         self.step_description.setText(stage.description)
@@ -795,6 +1284,15 @@ class DashboardWidget(QFrame):
 
         threading.Thread(target=worker, daemon=True).start()
 
+    def _on_api_test_finished(self, success: bool, message: str) -> None:
+        try:
+            if success:
+                InfoBar.success("API Test", message, duration=3000, position=InfoBarPosition.TOP, parent=self)  # type: ignore
+            else:
+                InfoBar.error("API Test", message, duration=5000, position=InfoBarPosition.TOP, parent=self)  # type: ignore
+        except NameError:
+            self._append_log(f"API Test result: {message}")
+
     def _test_live_api(self) -> None:
         settings = self._integration_settings()
 
@@ -802,8 +1300,10 @@ class DashboardWidget(QFrame):
             try:
                 result = test_vaultwares_api(settings)
                 self.signals.log.emit(json.dumps(result, indent=2))
+                self.signals.api_test_finished.emit(True, "Connection to Vaultwares API successful")
             except Exception as exc:  # noqa: BLE001
                 self.signals.log.emit(f"[ERROR] {exc}")
+                self.signals.api_test_finished.emit(False, str(exc))
 
         threading.Thread(target=worker, daemon=True).start()
 
@@ -851,6 +1351,10 @@ class DashboardWidget(QFrame):
         self.state_card.setStyleSheet(state_card_style(theme, self.manifest.state))
         for label in self.preview_labels:
             label.setStyleSheet(preview_style(theme))
+        self._header_frame.setStyleSheet(
+            f"QFrame {{ background: {theme.surface_elevated};"
+            f" border-bottom: 1px solid {theme.border}; border-radius: 0px; }}"
+        )
 
 
 class Window(FluentWindow):
@@ -865,18 +1369,22 @@ class Window(FluentWindow):
         self.settings.toggle_btn.clicked.connect(self._toggle_strict_mode)
         self.settings.theme_changed.connect(self._apply_theme)
 
+        self.dashboard.theme_changed.connect(self._apply_theme)
+        self.dashboard.lang_changed.connect(self._apply_lang)
         self.addSubInterface(self.dashboard, FIF.HOME, "Studio")
         self.addSubInterface(self.settings, FIF.SETTING, "Settings", NavigationItemPosition.BOTTOM)
-        self.resize(1320, 860)
+        self.resize(1440, 900)
 
     def _toggle_strict_mode(self) -> None:
         strict_mode = not self.dashboard.strict_mode
+        _settings.setValue("general/strict_mode", strict_mode)
         self.dashboard.set_strict_mode(strict_mode)
         self.settings.set_mode(strict_mode)
 
     def _apply_theme(self, theme: VaultTheme) -> None:
         global _active_theme
         _active_theme = theme
+        _settings.setValue("theme", theme.name)
         qt_theme = Theme.DARK if theme.mode == "dark" else Theme.LIGHT
         setTheme(qt_theme)
         setThemeColor(QColor(theme.accent))
@@ -885,6 +1393,16 @@ class Window(FluentWindow):
             _qapp.setStyleSheet(build_stylesheet(theme))
         self.dashboard.refresh_cards(theme)
         self.settings.setStyleSheet(card_style(theme))
+        self.settings.theme_swatch.setStyleSheet(
+            f"background: {theme.accent}; border-radius: 4px;"
+        )
+        for combo in (self.settings.theme_combo, self.dashboard.header_theme_combo):
+            combo.blockSignals(True)
+            combo.setCurrentText(theme.name)
+            combo.blockSignals(False)
+
+    def _apply_lang(self, lang: str) -> None:
+        self.settings.retranslate()
 
 
 if __name__ == "__main__":

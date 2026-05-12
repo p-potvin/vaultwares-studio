@@ -42,6 +42,7 @@ COLMAP_CANDIDATE_PATHS = [
     if os.environ.get("COLMAP_EXE")
 ]
 COLMAP_CANDIDATE_PATHS.append(Path(r"C:\Users\Administrator\Desktop\COLMAP\bin\colmap.exe"))
+COLMAP_CANDIDATE_PATHS.append(ROOT / "tools" / "colmap" / "bin" / "colmap.exe")
 
 
 class StageState(str, Enum):
@@ -464,6 +465,13 @@ class DigitalTwinStudioRunner:
         ns_train = resolve_binary("ns-train")
         if not any(self.frames_dir.glob("*.png")):
             raise RuntimeError("Frame extraction must complete before reconstruction.")
+        
+        run_env = os.environ.copy()
+        run_env["PYTHONUTF8"] = "1"
+        if colmap_bin:
+            colmap_dir = str(Path(colmap_bin).parent.resolve())
+            run_env["PATH"] = f"{colmap_dir}{os.pathsep}{run_env.get('PATH', '')}"
+
         degraded = False
         if ns_process_data and colmap_bin:
             cmd = [
@@ -473,9 +481,10 @@ class DigitalTwinStudioRunner:
                 str(self.frames_dir),
                 "--output-dir",
                 str(self.recon_dir),
+                "--no-gpu",
             ]
             try:
-                self._run_command(cmd, "Reconstruction failed.", timeout_seconds=3600)
+                self._run_command(cmd, "Reconstruction failed.", timeout_seconds=3600, env=run_env)
             except RuntimeError:
                 if self.strict_mode:
                     raise
@@ -497,10 +506,13 @@ class DigitalTwinStudioRunner:
                 "--max-num-iterations",
                 "250",
                 "--vis",
-                "viewer",
+                "none",
             ]
             try:
-                self._run_command(train_cmd, "gsplat training failed.", timeout_seconds=3600)
+                self._run_command(train_cmd, "gsplat training failed.", timeout_seconds=3600, env=run_env)
+                exported_ply = self._export_gsplat_ply()
+                if exported_ply is None or not self._convert_ply_to_cloud_files(exported_ply):
+                    degraded = True
             except RuntimeError:
                 if self.strict_mode:
                     raise
@@ -642,6 +654,77 @@ class DigitalTwinStudioRunner:
         ]
         self._run_command(cmd, "Walkthrough render failed.", timeout_seconds=1800)
 
+    def _find_gsplat_config(self) -> "Path | None":
+        """Return the most recently modified config.yml under gsplat_outputs, or None."""
+        gsplat_out = self.recon_dir / "gsplat_outputs"
+        if not gsplat_out.exists():
+            return None
+        configs = sorted(gsplat_out.rglob("config.yml"), key=lambda p: p.stat().st_mtime, reverse=True)
+        return configs[0] if configs else None
+
+    def _export_gsplat_ply(self) -> "Path | None":
+        """Run ns-export gaussian-splat on the trained model and return the PLY path, or None."""
+        ns_export = resolve_binary("ns-export")
+        if ns_export is None:
+            self.log("ns-export not found; skipping gsplat PLY export.")
+            return None
+        config = self._find_gsplat_config()
+        if config is None:
+            self.log("No splatfacto config.yml found in gsplat_outputs; skipping PLY export.")
+            return None
+        export_dir = self.recon_dir / "gsplat_export"
+        export_dir.mkdir(parents=True, exist_ok=True)
+        cmd = [
+            ns_export,
+            "gaussian-splat",
+            "--load-config", str(config),
+            "--output-dir", str(export_dir),
+        ]
+        try:
+            self._run_command(cmd, "ns-export gaussian-splat failed.", timeout_seconds=600)
+        except RuntimeError as exc:
+            self.log(f"gsplat PLY export failed: {exc}")
+            return None
+        candidates = sorted(export_dir.rglob("*.ply"), key=lambda p: p.stat().st_mtime, reverse=True)
+        return candidates[0] if candidates else None
+
+    def _convert_ply_to_cloud_files(self, ply_source: Path) -> bool:
+        """Read a gsplat PLY with open3d and write cloud.ply + cloud.usda. Returns True on success."""
+        try:
+            import open3d as o3d
+        except ImportError:
+            self.log("open3d not available; cannot convert PLY.")
+            return False
+        try:
+            pcd = o3d.io.read_point_cloud(str(ply_source))
+        except Exception as exc:
+            self.log(f"open3d failed to read {ply_source}: {exc}")
+            return False
+        if len(pcd.points) == 0:
+            self.log(f"Loaded PLY has no points: {ply_source}")
+            return False
+        o3d.io.write_point_cloud(str(self.recon_ply_path), pcd)
+        self.log(f"Wrote {len(pcd.points)} points to {self.recon_ply_path}")
+        self._write_usd_from_point_cloud(pcd)
+        return True
+
+    def _write_usd_from_point_cloud(self, pcd) -> None:
+        """Write cloud.usda populated with real geometry from an open3d PointCloud."""
+        stage = Usd.Stage.CreateNew(str(self.recon_stage_path))
+        UsdGeom.SetStageUpAxis(stage, UsdGeom.Tokens.y)
+        root = UsdGeom.Xform.Define(stage, "/World")
+        stage.SetDefaultPrim(root.GetPrim())
+        pts_prim = UsdGeom.Points.Define(stage, "/World/Reconstruction")
+        pts_vec = [Gf.Vec3f(float(p[0]), float(p[1]), float(p[2])) for p in pcd.points]
+        pts_prim.GetPointsAttr().Set(pts_vec)
+        pts_prim.GetWidthsAttr().Set([0.02] * len(pts_vec))
+        if pcd.has_colors():
+            pts_prim.GetDisplayColorAttr().Set(
+                [Gf.Vec3f(float(c[0]), float(c[1]), float(c[2])) for c in pcd.colors]
+            )
+        stage.GetRootLayer().Save()
+        self.log(f"Wrote USD stage with {len(pts_vec)} real points to {self.recon_stage_path}")
+
     def _write_placeholder_reconstruction(self) -> None:
         stage = Usd.Stage.CreateNew(str(self.recon_stage_path))
         UsdGeom.SetStageUpAxis(stage, UsdGeom.Tokens.y)
@@ -675,14 +758,17 @@ class DigitalTwinStudioRunner:
             encoding="utf-8",
         )
 
-    def _run_command(self, cmd: list[str], error_message: str, timeout_seconds: int) -> None:
+    def _run_command(self, cmd: list[str], error_message: str, timeout_seconds: int, env: dict[str, str] | None = None) -> None:
         self.log(f"Running: {' '.join(cmd)}")
         completed = subprocess.run(
             cmd,
             check=False,
             capture_output=True,
             text=True,
+            encoding="utf-8",
+            errors="replace",
             timeout=timeout_seconds,
+            env=env,
         )
         if completed.stdout:
             self.log(completed.stdout.strip())

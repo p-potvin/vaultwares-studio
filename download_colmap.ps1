@@ -1,7 +1,7 @@
 # download_colmap.ps1
 # This script downloads a portable version of COLMAP for Windows.
 
-$url = "https://github.com/colmap/colmap/releases/download/3.11.0/COLMAP-3.11-windows-cuda.zip"
+$url = "https://github.com/colmap/colmap/releases/download/4.0.4/colmap-x64-windows-cuda.zip"
 $dest = "colmap.zip"
 $extractPath = "$PSScriptRoot\tools\colmap"
 

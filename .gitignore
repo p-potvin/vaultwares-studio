@@ -219,3 +219,6 @@ __marimo__/
 .omx
 .omx/
 .omx/logs
+
+# COLMAP
+tools/colmap/*
