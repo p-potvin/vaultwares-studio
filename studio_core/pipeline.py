@@ -41,7 +41,8 @@ COLMAP_CANDIDATE_PATHS = [
     for _ in [0]
     if os.environ.get("COLMAP_EXE")
 ]
-COLMAP_CANDIDATE_PATHS.append(Path(r"C:\Users\Administrator\Desktop\COLMAP\bin\colmap.exe"))
+COLMAP_CANDIDATE_PATHS.append(Path(r"C:\Users\Administrator\Desktop\COLMAP\COLMAP.bat"))
+COLMAP_CANDIDATE_PATHS.append(ROOT / "tools" / "colmap" / "COLMAP.bat")
 COLMAP_CANDIDATE_PATHS.append(ROOT / "tools" / "colmap" / "bin" / "colmap.exe")
 
 
@@ -481,8 +482,9 @@ class DigitalTwinStudioRunner:
                 str(self.frames_dir),
                 "--output-dir",
                 str(self.recon_dir),
-                "--no-gpu",
             ]
+            if str(colmap_bin).upper().endswith(".BAT"):
+                cmd.extend(["--colmap-cmd", "COLMAP.bat"])
             try:
                 self._run_command(cmd, "Reconstruction failed.", timeout_seconds=3600, env=run_env)
             except RuntimeError:
