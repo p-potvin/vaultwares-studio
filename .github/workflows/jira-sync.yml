@@ -1,0 +1,37 @@
+# Caller workflow -- copy this file to each tracked repo as
+# .github/workflows/jira-sync.yml.
+#
+# Requires three repo-level secrets:
+#   JIRA_BASE_URL  e.g. https://vaultwares.atlassian.net
+#   JIRA_EMAIL     e.g. lefondhumain@pm.me
+#   JIRA_TOKEN     Atlassian API token
+#
+# Pushed to each repo by scripts/deploy_caller_workflows.ps1.
+
+name: Sync to Jira
+
+on:
+  pull_request:
+    types:
+      - opened
+      - edited
+      - closed
+      - reopened
+      - ready_for_review
+      - converted_to_draft
+  pull_request_review:
+    types: [submitted]
+  pull_request_review_comment:
+    types: [created]
+  issue_comment:
+    types: [created]
+  push:
+    branches: [main, master]
+
+jobs:
+  sync:
+    uses: p-potvin/vw-jira-sync/.github/workflows/sync.yml@main
+    secrets:
+      JIRA_BASE_URL: ${{ secrets.JIRA_BASE_URL }}
+      JIRA_EMAIL: ${{ secrets.JIRA_EMAIL }}
+      JIRA_TOKEN: ${{ secrets.JIRA_TOKEN }}
