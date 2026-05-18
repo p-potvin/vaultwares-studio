@@ -252,3 +252,11 @@ See [TESTING.md](TESTING.md) for step-by-step testing instructions and troublesh
 | [`REPORT.md`](REPORT.md) | Research notes and architectural direction |
 | [`TECHNICAL_SPECS.md`](TECHNICAL_SPECS.md) | Detailed dependency and hardware notes |
 | [`requirements.txt`](requirements.txt) | Broad dependency list for the larger research pipeline |
+
+## Features
+
+- **Local-first OpenUSD Generation:** Turn room videos into resumable digital-twin jobs emitting valid `.usda` files.
+- **Robust App Mode:** Desktop studio app using fallback-safe reconstruction that writes deterministic placeholders when heavy tools are missing.
+- **Redis-backed Orchestration Pipeline:** Agent-driven tasks (via ExtrovertAgent base class) to extract frames, reconstruct 3D spaces, and compose USDs.
+- **Video Processing Pipeline:** Integrated FFmpeg support for sampling, trimming, resizing, and frame-level processing.
+- **Fallback-safe Reconstruction:** Sparse reconstruction (COLMAP) and Gaussian splatting (gsplat / Nerfstudio) with built-in placeholder fallback mechanism.
