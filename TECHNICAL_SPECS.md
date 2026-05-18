@@ -454,4 +454,4 @@ The following version combinations have been verified to work together:
 
 ---
 
-*Technical Specifications document for the `usd-playground` project. Last updated: April 2026.*
+*Technical Specifications document for the `vaultwares-studio` project. Last updated: April 2026.*

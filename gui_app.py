@@ -94,7 +94,7 @@ except ImportError:
     FIF = _FallbackIcon()
     NavigationItemPosition = _FallbackNavigationItemPosition()
     Theme = _FallbackTheme()
-from studio_core.pipeline import (
+from vaultwares_studio.pipeline import (
     DEFAULT_CAMERA_PROMPT,
     DEFAULT_SOURCE_VIDEO,
     JOBS_DIR,
@@ -108,13 +108,13 @@ from studio_core.pipeline import (
     next_incomplete_stage_key,
     stage_dependencies_complete,
 )
-from studio_core.integration import (
+from vaultwares_studio.integration import (
     VaultFlowsConnectionSettings,
     export_vaultflows_workflow,
     push_workflow_to_vaultwares,
     test_vaultwares_api,
 )
-from studio_core.viewer import open_live_viewer
+from vaultwares_studio.viewer import open_live_viewer
 
 ROOT = Path(__file__).resolve().parent
 ICON_PATH = ROOT / "Brand" / "favicons" / "vaultwares-favicon-gold-filled-256.png"
@@ -141,7 +141,7 @@ def _detect_os_theme() -> str:
         return "dark"
 
 
-_settings = QSettings("VaultWares", "USDPlayground")
+_settings = QSettings("VaultWares", "VaultwaresStudio")
 _tm = VaultThemeManager()
 _saved_theme_name = _settings.value("theme", None)
 if _saved_theme_name:
@@ -951,7 +951,7 @@ class DashboardWidget(QFrame):
         h_layout = QHBoxLayout(self._header_frame)
         h_layout.setContentsMargins(18, 0, 18, 0)
         h_layout.setSpacing(12)
-        brand = QLabel("\U0001f537 USD Playground", self._header_frame)
+        brand = QLabel("\U0001f537 VaultWares Studio", self._header_frame)
         brand.setStyleSheet(
             f"color: {_active_theme.text_primary}; font-size: 15px; font-weight: 600;"
         )

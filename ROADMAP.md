@@ -6,7 +6,7 @@ Goal: Provide a desktop workflow that can create, resume, run, and inspect local
 Current baseline:
 
 - PySide desktop shell in `gui_app.py`
-- reusable job execution in `studio_core/`
+- reusable job execution in `vaultwares_studio/`
 - resumable manifests under `data/jobs/`
 - fallback-safe reconstruction outputs when heavyweight tools are missing
 - exported USD, camera previews, and walkthrough MP4

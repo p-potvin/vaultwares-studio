@@ -624,4 +624,4 @@ This project is **feasible on consumer hardware with 12 GB VRAM** for prototypin
 
 ---
 
-*Report generated for the `usd-playground` project. Last updated: April 2026.*
+*Report generated for the `vaultwares-studio` project. Last updated: April 2026.*

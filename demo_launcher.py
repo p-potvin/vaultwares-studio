@@ -8,7 +8,7 @@ import tkinter as tk
 from pathlib import Path
 from tkinter import filedialog, messagebox, scrolledtext, ttk
 
-from studio_core.pipeline import DEFAULT_SOURCE_VIDEO, DigitalTwinStudioRunner, create_job_manifest
+from vaultwares_studio.pipeline import DEFAULT_SOURCE_VIDEO, DigitalTwinStudioRunner, create_job_manifest
 
 APP_ROOT = Path(__file__).resolve().parent
 

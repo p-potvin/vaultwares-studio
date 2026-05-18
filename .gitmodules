@@ -1,9 +1,9 @@
-[submodule "vaultwares_agentciation"]
-	path = vaultwares_agentciation
-	url = https://github.com/p-potvin/vaultwares-agentciation
-[submodule "vault-themes"]
-	path = vault-themes
-	url = https://github.com/p-potvin/vault-themes
 [submodule "cosmos-reason2"]
 	path = cosmos-reason2
 	url = https://github.com/nvidia-cosmos/cosmos-reason2
+[submodule "vaultwares-themes"]
+	path = vaultwares-themes
+	url = https://github.com/p-potvin/vaultwares-themes
+[submodule "vaultwares_adk"]
+	path = vaultwares_adk
+	url = https://github.com/p-potvin/vaultwares-adk

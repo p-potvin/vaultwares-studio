@@ -1,6 +1,6 @@
-# usd-playground
+# vaultwares-studio
 
-`usd-playground` is a local-first OpenUSD desktop app for turning a room video into a resumable digital-twin job with generated USD, camera previews, a walkthrough video, and optional VaultWares workflow export.
+`vaultwares-studio` is a local-first OpenUSD desktop app for turning a room video into a resumable digital-twin job with generated USD, camera previews, a walkthrough video, and optional VaultWares workflow export.
 
 If you are just trying to answer, "Does this repo work on my machine?", start with the smoke test. It produces a real `.usda` file you can inspect. If you want the working app, run the desktop studio.
 
@@ -88,7 +88,7 @@ For a non-UI app verification run:
 
 ## What `pytest` Actually Covers
 
-Default `pytest` is intentionally scoped to the tests that belong to `usd-playground` itself:
+Default `pytest` is intentionally scoped to the tests that belong to `vaultwares-studio` itself:
 
 - `tests/test_usd_smoke.py`
 - `vaultwares_agentciation/omx_integration/tests/`
@@ -109,7 +109,7 @@ The repo also contains an agent-driven pipeline:
 - `manager_runner.py`
 - `run_pipeline_demo.py`
 
-That flow is now the legacy advanced orchestration path. It depends on extra tooling such as Redis, ffmpeg, Nerfstudio/COLMAP, and the vendored `vaultwares_agentciation` framework. The everyday app path is `gui_app.py`, which uses `studio_core` directly and does not require Redis.
+That flow is now the legacy advanced orchestration path. It depends on extra tooling such as Redis, ffmpeg, Nerfstudio/COLMAP, and the vendored `vaultwares_agentciation` framework. The everyday app path is `gui_app.py`, which uses `vaultwares_studio` directly and does not require Redis.
 
 The smoke test is the reliable starting point because it proves all of the following with minimal setup:
 
@@ -229,7 +229,7 @@ To build a Windows executable:
 
 That produces:
 
-- `dist/usd-playground-demo.exe`
+- `dist/vaultwares-studio-demo.exe`
 
 Notes:
 

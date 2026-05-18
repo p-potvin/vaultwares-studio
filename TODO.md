@@ -5,7 +5,7 @@
 - [x] Integrate `vaultwares-agentciation` framework
 - [x] Add NVIDIA Cosmos submodules (`cosmos-reason2`, `cosmos-transfer2.5`)
 - [x] Refactor pipeline to event-driven orchestrator (`run_pipeline_demo.py`)
-- [x] Add desktop app shell with direct `studio_core` execution
+- [x] Add desktop app shell with direct `vaultwares_studio` execution
 - [x] Add resumable job manifests under `data/jobs/`
 - [x] Add open latest/open manifest job resume controls
 

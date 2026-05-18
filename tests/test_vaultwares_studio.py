@@ -4,9 +4,9 @@ from pathlib import Path
 
 import pytest
 
-from studio_core.camera_director import build_camera_bundle
-from studio_core.integration import build_vaultflows_workflow
-from studio_core.pipeline import (
+from vaultwares_studio.camera_director import build_camera_bundle
+from vaultwares_studio.integration import build_vaultflows_workflow
+from vaultwares_studio.pipeline import (
     DEFAULT_SOURCE_VIDEO,
     DigitalTwinStudioRunner,
     StageState,

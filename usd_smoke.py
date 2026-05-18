@@ -74,7 +74,7 @@ def build_smoke_stage(
 
 def main() -> int:
     parser = argparse.ArgumentParser(
-        description="Generate the usd-playground smoke-test USD artifact."
+        description="Generate the vaultwares-studio smoke-test USD artifact."
     )
     parser.add_argument(
         "--output",

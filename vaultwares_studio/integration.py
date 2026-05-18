@@ -36,7 +36,7 @@ def build_vaultflows_workflow(manifest: JobManifest) -> dict[str, Any]:
         "id": manifest.job_id,
         "name": f"Digital Twin Studio - {source_name}",
         "category": "Digital Twin",
-        "description": "Guided local-first digital twin workflow exported from usd-playground for Vault Flows / Vaultwares Pipelines.",
+        "description": "Guided local-first digital twin workflow exported from vaultwares-studio for Vault Flows / Vaultwares Pipelines.",
         "pin": True,
         "favorite": True,
         "lastRun": manifest.updated_at,

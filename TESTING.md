@@ -1,9 +1,9 @@
-# Testing usd-playground
+# Testing vaultwares-studio
 
 This repo has two very different layers:
 
 1. A small, practical OpenUSD smoke test you can run locally.
-2. The desktop Digital Twin Studio app, which runs the local pipeline through `studio_core`.
+2. The desktop Digital Twin Studio app, which runs the local pipeline through `vaultwares_studio`.
 3. A legacy Redis-driven orchestration demo for advanced agent experiments.
 
 For everyday users, start with the smoke test, then run the headless app pipeline.
@@ -78,7 +78,7 @@ It skips:
 - `cosmos-reason2/` because it is an upstream submodule with additional platform-specific requirements
 - `vault-themes/` because it is not part of the Python test surface for this repo
 
-Without that scoping, a normal `pytest` run tries to execute unrelated vendored tests and fails for reasons that have nothing to do with `usd-playground`.
+Without that scoping, a normal `pytest` run tries to execute unrelated vendored tests and fails for reasons that have nothing to do with `vaultwares-studio`.
 
 ## About The Bigger Pipeline
 

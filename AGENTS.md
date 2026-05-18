@@ -1,4 +1,4 @@
-# usd-playground
+# vaultwares-studio
 
 > For company-wide rules, read `vaultwares-docs/AGENTS.md` first.
 
@@ -7,7 +7,7 @@ These rules focus on Figma-to-code work, native desktop UI consistency, and Vaul
 ## Project Structure
 
 - The main native UI shell lives in `gui_app.py`.
-- Reusable execution logic lives under `studio_core/`.
+- Reusable execution logic lives under `vaultwares_studio/`.
 - Tests for repo-owned logic live under `tests/`.
 - Runtime outputs belong under `data/jobs/` and must not be treated as source files.
 
@@ -31,9 +31,9 @@ These rules focus on Figma-to-code work, native desktop UI consistency, and Vaul
 
 ## Desktop Component Rules
 
-- Reuse shared pipeline data from `studio_core/` instead of embedding business logic in UI widgets.
+- Reuse shared pipeline data from `vaultwares_studio/` instead of embedding business logic in UI widgets.
 - UI widgets should render manifest data, trigger actions, and display artifacts; they should not own pipeline rules.
-- New pipeline features should land in `studio_core/` first, then be surfaced in the UI.
+- New pipeline features should land in `vaultwares_studio/` first, then be surfaced in the UI.
 
 ## Figma MCP Integration Rules
 
@@ -66,7 +66,7 @@ These rules define how to translate Figma designs into code for this repo.
 
 ## Testing Rules
 
-- Add targeted tests for new logic in `studio_core/`.
+- Add targeted tests for new logic in `vaultwares_studio/`.
 - Prefer deterministic tests around manifests, stage state, camera planning, and artifact generation.
 - Keep UI verification lightweight unless a change truly requires Qt-specific behavior testing.
 
