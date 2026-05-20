@@ -3,8 +3,8 @@ import os
 import json
 import redis
 
-# Add vaultwares-agentciation to sys.path
-sys.path.insert(0, os.path.abspath("..\\vaultwares-agentciation"))
+# Add vaultwares-adk to sys.path
+sys.path.insert(0, os.path.abspath("..\\vaultwares-adk"))
 
 if __name__ == "__main__":
     r = redis.Redis(host='localhost', port=6379, db=0)

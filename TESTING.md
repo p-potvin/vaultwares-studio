@@ -70,13 +70,13 @@ Use `Open Latest Job` in the app to reopen the most recent verified run.
 `pytest.ini` intentionally limits discovery to:
 
 - `tests/`
-- `vaultwares_agentciation/omx_integration/tests/`
+- `vaultwares-adk/omx_integration/tests/`
 
 It skips:
 
 - `.venv/` because that contains third-party package tests
 - `cosmos-reason2/` because it is an upstream submodule with additional platform-specific requirements
-- `vault-themes/` because it is not part of the Python test surface for this repo
+- `vaultwares-themes/` because it is not part of the Python test surface for this repo
 
 Without that scoping, a normal `pytest` run tries to execute unrelated vendored tests and fails for reasons that have nothing to do with `vaultwares-studio`.
 

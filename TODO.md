@@ -2,7 +2,7 @@
 
 ## Phase 0: Infrastructure & Setup
 
-- [x] Integrate `vaultwares-agentciation` framework
+- [x] Integrate `vaultwares-adk` framework
 - [x] Add NVIDIA Cosmos submodules (`cosmos-reason2`, `cosmos-transfer2.5`)
 - [x] Refactor pipeline to event-driven orchestrator (`run_pipeline_demo.py`)
 - [x] Add desktop app shell with direct `vaultwares_studio` execution

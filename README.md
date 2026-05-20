@@ -91,13 +91,13 @@ For a non-UI app verification run:
 Default `pytest` is intentionally scoped to the tests that belong to `vaultwares-studio` itself:
 
 - `tests/test_usd_smoke.py`
-- `vaultwares_agentciation/omx_integration/tests/`
+- `vaultwares-adk/omx_integration/tests/`
 
 It does **not** recurse into:
 
 - `.venv/`
 - `cosmos-reason2/`
-- `vault-themes/`
+- `vaultwares-themes/`
 
 That is deliberate. `cosmos-reason2` is an upstream submodule with extra platform-specific dependencies and should not be treated as the default local smoke-test target for this repo.
 
@@ -109,7 +109,7 @@ The repo also contains an agent-driven pipeline:
 - `manager_runner.py`
 - `run_pipeline_demo.py`
 
-That flow is now the legacy advanced orchestration path. It depends on extra tooling such as Redis, ffmpeg, Nerfstudio/COLMAP, and the vendored `vaultwares_agentciation` framework. The everyday app path is `gui_app.py`, which uses `vaultwares_studio` directly and does not require Redis.
+That flow is now the legacy advanced orchestration path. It depends on extra tooling such as Redis, ffmpeg, Nerfstudio/COLMAP, and the vendored `vaultwares-adk` framework. The everyday app path is `gui_app.py`, which uses `vaultwares_studio` directly and does not require Redis.
 
 The smoke test is the reliable starting point because it proves all of the following with minimal setup:
 
