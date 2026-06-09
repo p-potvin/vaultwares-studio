@@ -115,9 +115,11 @@ from vaultwares_studio.integration import (
     push_workflow_to_vaultwares,
     test_vaultwares_api,
 )
+from vaultwares_studio.presets import DEFAULT_PRESET_KEY, PRESETS, get_preset
 from vaultwares_studio.runners import (
     FLAVOR_RATES_USD_PER_HOUR,
     HfJobsConfig,
+    HfJobsStageRunner,
     estimate_cost,
     get_hf_token,
     run_echo_smoke_test,
@@ -476,6 +478,9 @@ _STRINGS: dict[str, dict[str, str]] = {
     "remote_saved":          {"EN": "Remote settings saved.",                  "QC": "Paramètres enregistrés."},
     "remote_no_token":       {"EN": "No HF token configured. Paste your token and save first.",
                               "QC": "Aucun jeton HF configuré. Collez votre jeton et enregistrez d'abord."},
+    "preset_label":          {"EN": "Quality preset",                            "QC": "Préréglage de qualité"},
+    "remote_declined":       {"EN": "Remote reconstruction declined; using the local quick path.",
+                              "QC": "Reconstruction à distance refusée; utilisation du chemin local rapide."},
 }
 
 
@@ -786,6 +791,16 @@ class DashboardWidget(QFrame):
         actions_layout = QVBoxLayout(actions_card)
         actions_layout.setContentsMargins(18, 18, 18, 18)
         actions_layout.setSpacing(8)
+        preset_row = QHBoxLayout()
+        self.preset_label = BodyLabel(_t("preset_label"), actions_card)
+        preset_row.addWidget(self.preset_label)
+        self.preset_combo = ComboBox(actions_card)
+        for preset in PRESETS.values():
+            self.preset_combo.addItem(preset.label, userData=preset.key)
+        default_index = list(PRESETS).index(DEFAULT_PRESET_KEY)
+        self.preset_combo.setCurrentIndex(default_index)
+        preset_row.addWidget(self.preset_combo, 1)
+        actions_layout.addLayout(preset_row)
         self.run_full_job_btn = PrimaryPushButton(FIF.PLAY_SOLID, _t("run_full_job"), actions_card)
         self.run_stage_btn = PrimaryPushButton(FIF.PLAY, _t("run_selected_step"), actions_card)
         self.open_job_folder_btn = PrimaryPushButton(FIF.FOLDER, _t("open_job_folder"), actions_card)
@@ -1146,6 +1161,7 @@ class DashboardWidget(QFrame):
         self.open_manifest_btn.setText(_t("open_manifest"))
         self.run_full_job_btn.setText(_t("run_full_job"))
         self.run_stage_btn.setText(_t("run_selected_step"))
+        self.preset_label.setText(_t("preset_label"))
         self.open_job_folder_btn.setText(_t("open_job_folder"))
         # right column state card
         self.state_title.setText(_t("run_state"))
@@ -1262,15 +1278,52 @@ class DashboardWidget(QFrame):
     def _run_full_job(self) -> None:
         self._start_worker(run_full_job=True)
 
+    def _maybe_build_remote_runner(self, run_full_job: bool) -> HfJobsStageRunner | None:
+        """Pre-confirm the remote reconstruction cost on the GUI thread.
+
+        Returns a pre-confirmed runner, or None to use the local quick path
+        (not configured, stage complete, not part of this run, or declined).
+        """
+        config = HfJobsConfig.load()
+        if not (config.enabled and get_hf_token()):
+            return None
+        recon_stage = next(
+            (stage for stage in self.manifest.stages if stage.key == "reconstruction"), None
+        )
+        if recon_stage is None or recon_stage.state == StageState.COMPLETE.value:
+            return None
+        if recon_stage.placement != "remote":
+            return None
+        if not (run_full_job or self.selected_stage_key == "reconstruction"):
+            return None
+        preset = get_preset(self.manifest.metadata.get("preset"))
+        estimate = preset.cost()
+        answer = QMessageBox.question(
+            self,
+            _t("remote_cost_title"),
+            _t("remote_cost_body").format(estimate=estimate.summary()),
+        )
+        if answer != QMessageBox.StandardButton.Yes:
+            self._append_log(_t("remote_declined"))
+            return None
+        return HfJobsStageRunner(config=config, confirm_cost=lambda _estimate: True)
+
     def _start_worker(self, run_full_job: bool) -> None:
         if self.is_running:
             return
         self._save_camera_prompt()
+        self.manifest.metadata["preset"] = self.preset_combo.currentData() or DEFAULT_PRESET_KEY
+        remote_runner = self._maybe_build_remote_runner(run_full_job)
         self.signals.running_changed.emit(True)
 
         def worker() -> None:
             try:
-                runner = DigitalTwinStudioRunner(self.manifest, self.signals.log.emit, strict_mode=self.strict_mode)
+                runner = DigitalTwinStudioRunner(
+                    self.manifest,
+                    self.signals.log.emit,
+                    strict_mode=self.strict_mode,
+                    remote_runner=remote_runner,
+                )
                 if run_full_job:
                     result = runner.run_remaining()
                 else:
@@ -1396,7 +1449,11 @@ class DashboardWidget(QFrame):
         _open_path(Path(self.manifest.walkthrough_video))
 
     def _open_live_viewer(self) -> None:
-        point_cloud = Path(self.manifest.output_dir) / "reconstruction" / "cloud.ply"
+        recon_dir = Path(self.manifest.output_dir) / "reconstruction"
+        # cloud.ply now carries full gaussian attributes; the Open3D viewer
+        # renders the decimated preview when one exists.
+        preview = recon_dir / "cloud_preview.ply"
+        point_cloud = preview if preview.exists() else recon_dir / "cloud.ply"
 
         def worker() -> None:
             success, message = open_live_viewer(point_cloud)

@@ -15,7 +15,16 @@ from typing import Callable
 from pxr import Gf, Sdf, Usd, UsdGeom, UsdLux
 
 from .camera_director import build_camera_bundle
-from .runners import CancelToken, LocalStageRunner, StageRunner
+from .presets import get_preset
+from .runners import (
+    CancelToken,
+    CostDeniedError,
+    LocalStageRunner,
+    StageCancelledError,
+    StageContext,
+    StageRunner,
+)
+from .splat_io import convert_splat_outputs, is_gaussian_ply
 
 MANIFEST_SCHEMA_VERSION = 2
 
@@ -382,6 +391,7 @@ class DigitalTwinStudioRunner:
         self.deliverables_dir = self.root / "deliverables"
         self.recon_stage_path = self.recon_dir / "cloud.usda"
         self.recon_ply_path = self.recon_dir / "cloud.ply"
+        self.recon_preview_ply_path = self.recon_dir / "cloud_preview.ply"
         self.usd_stage_path = self.usd_dir / "digital_twin_scene.usda"
         self.camera_plan_path = self.usd_dir / "camera_plan.json"
         self.walkthrough_path = self.deliverables_dir / "digital_twin_walkthrough.mp4"
@@ -521,64 +531,50 @@ class DigitalTwinStudioRunner:
 
     def _run_reconstruction(self, stage: StageRecord) -> None:
         self.recon_dir.mkdir(parents=True, exist_ok=True)
-        ns_process_data = resolve_binary("ns-process-data")
-        colmap_bin = resolve_binary("colmap")
-        ns_train = resolve_binary("ns-train")
         if not any(self.frames_dir.glob("*.png")):
             raise RuntimeError("Frame extraction must complete before reconstruction.")
-        
-        run_env = os.environ.copy()
-        run_env["PYTHONUTF8"] = "1"
-        if colmap_bin:
-            colmap_dir = str(Path(colmap_bin).parent.resolve())
-            run_env["PATH"] = f"{colmap_dir}{os.pathsep}{run_env.get('PATH', '')}"
+        preset = get_preset(self.manifest.metadata.get("preset"))
+        exported_ply: Path | None = None
 
-        degraded = False
-        if ns_process_data and colmap_bin:
-            cmd = [
-                ns_process_data,
-                "images",
-                "--data",
-                str(self.frames_dir),
-                "--output-dir",
-                str(self.recon_dir),
-            ]
-            if str(colmap_bin).upper().endswith(".BAT"):
-                cmd.extend(["--colmap-cmd", "COLMAP.bat"])
+        if stage.placement == "remote" and self.remote_runner is not None:
             try:
-                self._run_command(cmd, "Reconstruction failed.", timeout_seconds=3600, env=run_env)
-            except RuntimeError:
+                exported_ply = self._run_remote_reconstruction(stage, preset)
+            except StageCancelledError:
+                raise
+            except CostDeniedError as exc:
+                self.log(f"{exc} Using the local quick path instead.")
+            except RuntimeError as exc:
                 if self.strict_mode:
                     raise
-                degraded = True
-                self._write_placeholder_reconstruction()
-        else:
-            degraded = True
-            self._write_placeholder_reconstruction()
+                self.log(f"Remote reconstruction failed, falling back to local path: {exc}")
+        elif stage.placement == "remote":
+            self.log(
+                "Reconstruction prefers remote execution but no remote runner is "
+                "configured (Settings > Remote Compute). Using the local quick path."
+            )
 
-        transforms_path = self.recon_dir / "transforms.json"
-        if ns_train and transforms_path.exists():
-            train_cmd = [
-                ns_train,
-                "splatfacto",
-                "--data",
-                str(self.recon_dir),
-                "--output-dir",
-                str(self.recon_dir / "gsplat_outputs"),
-                "--max-num-iterations",
-                "250",
-                "--vis",
-                "none",
-            ]
+        if exported_ply is None:
+            exported_ply = self._run_local_reconstruction(stage)
+
+        degraded = True
+        if exported_ply is not None and is_gaussian_ply(exported_ply):
             try:
-                self._run_command(train_cmd, "gsplat training failed.", timeout_seconds=3600, env=run_env)
-                exported_ply = self._export_gsplat_ply()
-                if exported_ply is None or not self._convert_ply_to_cloud_files(exported_ply):
-                    degraded = True
-            except RuntimeError:
+                info = convert_splat_outputs(
+                    exported_ply,
+                    self.recon_ply_path,
+                    self.recon_preview_ply_path,
+                    self.recon_stage_path,
+                    self.log,
+                )
+                stage.metadata.update(info)
+                degraded = False
+            except Exception as exc:  # noqa: BLE001
                 if self.strict_mode:
                     raise
-                degraded = True
+                self.log(f"Splat conversion failed: {exc}")
+        elif exported_ply is not None:
+            # Unexpected non-gaussian PLY: keep the legacy point-cloud conversion.
+            degraded = not self._convert_ply_to_cloud_files(exported_ply)
 
         if not self.recon_stage_path.exists():
             self._write_placeholder_reconstruction()
@@ -587,14 +583,125 @@ class DigitalTwinStudioRunner:
             self._write_placeholder_ply()
             degraded = True
 
-        stage.metadata = {"degraded": degraded}
+        stage.metadata["degraded"] = degraded
+        stage.metadata["preset"] = preset.key
         stage.message = (
             "Reconstruction completed with placeholder-safe outputs."
             if degraded
-            else "Reconstruction completed with tool-backed outputs."
+            else f"Reconstruction completed ({stage.metadata.get('gaussians', '?')} gaussians, preset: {preset.key})."
         )
         self._add_artifact(stage, "Reconstruction Stage", "usd", self.recon_stage_path, "Reconstruction stage.")
-        self._add_artifact(stage, "Reconstruction PLY", "ply", self.recon_ply_path, "Point cloud output.")
+        self._add_artifact(stage, "Reconstruction PLY", "ply", self.recon_ply_path, "Gaussian splat output.")
+        if self.recon_preview_ply_path.exists():
+            self._add_artifact(
+                stage, "Preview Point Cloud", "ply", self.recon_preview_ply_path,
+                "Decimated point cloud for the live viewer.",
+            )
+
+    def _run_remote_reconstruction(self, stage: StageRecord, preset) -> Path | None:
+        """Train the splat on rented GPU compute (HF Jobs). Returns the splat PLY."""
+        import json as _json
+        import zipfile
+
+        runner_config = getattr(self.remote_runner, "config", None)
+        image_name = getattr(runner_config, "worker_image", "") if runner_config else ""
+        if not image_name or image_name.startswith("python:"):
+            raise RuntimeError(
+                "Remote worker image not configured. Build it with "
+                "tools/build_worker_image.ps1 and set worker_image in Settings."
+            )
+
+        frames_zip = self.recon_dir / "frames.zip"
+        frame_paths = sorted(self.frames_dir.glob("*.png"))
+        with zipfile.ZipFile(frames_zip, "w", zipfile.ZIP_STORED) as archive:
+            for frame in frame_paths:
+                archive.write(frame, frame.name)
+        self.log(f"Packed {len(frame_paths)} frames for remote reconstruction ({frames_zip.stat().st_size // 1_000_000} MB)")
+
+        export_dir = self.recon_dir / "gsplat_export"
+        export_dir.mkdir(parents=True, exist_ok=True)
+        splat_path = export_dir / "splat.ply"
+        summary_path = self.recon_dir / "summary.json"
+        ctx = StageContext(
+            job_dir=self.root,
+            job_id=self.manifest.job_id,
+            stage_key="reconstruction",
+            params={
+                "image": image_name,
+                "image_has_hub": True,
+                "flavor": preset.flavor,
+                "est_minutes": preset.est_minutes,
+                "timeout_seconds": int(max(1800, preset.est_minutes * 60 * 3)),
+                "command": [
+                    "python", "/opt/vw/recon_entrypoint.py",
+                    "--downscale", str(preset.downscale_factor),
+                    "--train-args", _json.dumps(preset.train_args()),
+                    "--keep-checkpoint",
+                ],
+            },
+            inputs=[frames_zip],
+            expected_outputs=[splat_path, summary_path],
+            log=self.log,
+            cancel=self.cancel_token,
+        )
+        result = self.remote_runner.run(ctx)
+        stage.runner = self.remote_runner.name
+        stage.params = {"preset": preset.key, "flavor": preset.flavor}
+        if result.metadata:
+            record_spend(self.manifest, "reconstruction", result.metadata)
+        return splat_path if splat_path.exists() else None
+
+    def _run_local_reconstruction(self, stage: StageRecord) -> Path | None:
+        """Local quick path (250-iteration smoke training). Heavy local runs stay opt-in."""
+        ns_process_data = resolve_binary("ns-process-data")
+        colmap_bin = resolve_binary("colmap")
+        ns_train = resolve_binary("ns-train")
+
+        run_env = os.environ.copy()
+        run_env["PYTHONUTF8"] = "1"
+        if colmap_bin:
+            colmap_dir = str(Path(colmap_bin).parent.resolve())
+            run_env["PATH"] = f"{colmap_dir}{os.pathsep}{run_env.get('PATH', '')}"
+
+        if not (ns_process_data and colmap_bin):
+            return None
+        cmd = [
+            ns_process_data,
+            "images",
+            "--data",
+            str(self.frames_dir),
+            "--output-dir",
+            str(self.recon_dir),
+        ]
+        if str(colmap_bin).upper().endswith(".BAT"):
+            cmd.extend(["--colmap-cmd", "COLMAP.bat"])
+        try:
+            self._run_command(cmd, "Reconstruction failed.", timeout_seconds=3600, env=run_env)
+        except RuntimeError:
+            if self.strict_mode:
+                raise
+            return None
+
+        transforms_path = self.recon_dir / "transforms.json"
+        if not (ns_train and transforms_path.exists()):
+            return None
+        local_preset = get_preset("local-debug")
+        train_cmd = [
+            ns_train,
+            "splatfacto",
+            "--data",
+            str(self.recon_dir),
+            "--output-dir",
+            str(self.recon_dir / "gsplat_outputs"),
+            *local_preset.train_args(),
+        ]
+        try:
+            self._run_command(train_cmd, "gsplat training failed.", timeout_seconds=3600, env=run_env)
+            return self._export_gsplat_ply()
+        except RuntimeError:
+            if self.strict_mode:
+                raise
+            return None
 
     def _run_usd_cameras(self, stage: StageRecord) -> None:
         self.usd_dir.mkdir(parents=True, exist_ok=True)

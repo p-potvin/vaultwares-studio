@@ -35,6 +35,8 @@ RUN pip install --no-cache-dir \
 # Generic stage bootstrap: downloads jobs/<id>/<stage>/in from the artifact
 # dataset, runs the stage command with VW_IN/VW_OUT, uploads out/.
 COPY vw_stage.py /opt/vw/vw_stage.py
+# Stage entrypoints invoked by the bootstrap's stage command.
+COPY recon_entrypoint.py /opt/vw/recon_entrypoint.py
 
 WORKDIR /workspace
 CMD ["python", "/opt/vw/vw_stage.py"]

@@ -22,12 +22,17 @@ HF_TOKEN environment variable.
 from __future__ import annotations
 
 import json
+import re
 import shutil
 import tempfile
+import threading
 import time
 from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Callable
+
+# Matches nerfstudio-style "(42.3%)" progress fragments in remote log lines.
+_PERCENT_RE = re.compile(r"\((\d{1,3}(?:\.\d+)?)%\)")
 
 from .base import (
     CostDeniedError,
@@ -238,6 +243,24 @@ class HfJobsStageRunner(StageRunner):
         started = time.monotonic()
         poll = max(MIN_POLL_INTERVAL_SECONDS, float(self.config.poll_interval_seconds))
 
+        # Stream remote logs in a side thread: nerfstudio progress percentages
+        # in the lines drive the GUI progress bar.
+        streamed_any = threading.Event()
+
+        def _stream_logs() -> None:
+            try:
+                for line in hub.fetch_job_logs(job_id=job.id, token=token):
+                    streamed_any.set()
+                    ctx.log(f"[remote] {line}")
+                    match = _PERCENT_RE.search(line)
+                    if match:
+                        ctx.progress(float(match.group(1)), line.strip())
+            except Exception as exc:  # noqa: BLE001 - logs are best-effort
+                ctx.log(f"[hf-jobs] log stream ended: {exc}")
+
+        log_thread = threading.Thread(target=_stream_logs, daemon=True)
+        log_thread.start()
+
         last_stage = ""
         while True:
             if ctx.cancel.cancelled:
@@ -256,11 +279,14 @@ class HfJobsStageRunner(StageRunner):
 
         duration = time.monotonic() - started
         actual = estimate_cost(flavor, duration / 60.0)
-        try:
-            for line in hub.fetch_job_logs(job_id=job.id, token=token):
-                ctx.log(f"[remote] {line}")
-        except Exception as exc:  # noqa: BLE001 - logs are best-effort
-            ctx.log(f"[hf-jobs] could not fetch job logs: {exc}")
+        log_thread.join(timeout=10)
+        if not streamed_any.is_set():
+            # The streaming generator yielded nothing live; fetch once post-run.
+            try:
+                for line in hub.fetch_job_logs(job_id=job.id, token=token):
+                    ctx.log(f"[remote] {line}")
+            except Exception as exc:  # noqa: BLE001 - logs are best-effort
+                ctx.log(f"[hf-jobs] could not fetch job logs: {exc}")
 
         cost_metadata = {
             "job_id": job.id,

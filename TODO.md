@@ -17,13 +17,18 @@ Plan of record: `docs/plans/plan-v1-remote-first-20260609.md` (M0–M6). Legacy 
 - [ ] Live verification: echo job round-trip on `cpu-basic` (needs HF token; run from Settings → "Run Echo Test Job")
 - [ ] Build & push `vw-studio-worker:0.1` to Docker Hub (needed before M1 remote reconstruction)
 
-## M1: Real Reconstruction, Remote — next
+## M1: Real Reconstruction, Remote
 
-- [ ] Worker recon entrypoint: ns-process-data (sequential) → ns-train splatfacto → ns-export gaussian-splat
-- [ ] Quality presets (Draft/Standard/High) with flavor + cost estimates
-- [ ] Full-attribute splat PLY (`splat_io.py`) — stop flattening through Open3D
-- [ ] PLY→USD: 26.03 schema probe, UsdGeomPoints+primvars fallback
-- [ ] Remote-stage wiring for `reconstruction` (placement honored)
+- [x] Worker recon entrypoint (`docker/worker/recon_entrypoint.py`): ns-process-data (sequential) → ns-train splatfacto (flag probe drops unsupported args) → ns-export gaussian-splat; structured error.json (e.g. too_few_registered_images) + summary.json + model.zip checkpoint for M2 renders
+- [x] Quality presets (`presets.py`): Draft/Standard/High + local-debug; flavor + cost per preset; VRAM-saver train args
+- [x] Full-attribute splat PLY (`splat_io.py`): read/write 3DGS PLY, decimated `cloud_preview.ply`, no more Open3D flattening
+- [x] PLY→USD: native 26.03 schema probe; lossless `UsdGeomPoints` + `primvars:gsplat:*` fallback (verified round-trip in tests)
+- [x] Remote-stage wiring: `reconstruction` honors placement, zips frames, runs the worker entrypoint via HfJobsStageRunner, records spend; CostDenied/failure falls back to local quick path then placeholders
+- [x] Remote log streaming with nerfstudio % progress parsing in HfJobsStageRunner
+- [x] GUI: quality-preset dropdown on the Studio tab; pre-run cost-confirm dialog for remote reconstruction; viewer prefers `cloud_preview.ply`
+- [x] Tests: splat round-trip/USD, presets, fake-remote reconstruction wiring (30 passing)
+- [ ] Live verification: real remote reconstruction on a room video (needs HF token + worker image pushed)
+- [ ] OOM auto-retry at next-lower preset (deferred — needs mid-run confirm UX; failures currently suggest a lower preset)
 
 ## M2+: see plan file (viewport/staging, Robot Lab, Cosmos, packaging)
 
