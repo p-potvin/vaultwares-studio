@@ -1,24 +1,34 @@
-# Roadmap: USD Digital Twin Studio
+# Roadmap: VaultWares Studio v1.0
 
-## Milestone 1: Working Local App (current)
-Goal: Provide a desktop workflow that can create, resume, run, and inspect local digital-twin jobs without Redis.
+Approved plan (2026-06-09, detailed): `docs/plans/plan-v1-remote-first-20260609.md`
 
-Current baseline:
+Direction: **remote-first compute**. The local PC (12 GB VRAM, also hosts the VaultWares API) stays light: GUI, WebGL splat viewport, ffmpeg frame extraction, CPU grid-nav sim. Heavy stages (COLMAP/splat training, Habitat RL, Cosmos, renders) run on rented GPU compute — Hugging Face Jobs primary (PRO, per-minute billing, custom Docker), generic SSH GPU-server backend second (future 48 GB L40S box). No WSL2. Every paid remote job requires explicit cost confirmation.
 
-- PySide desktop shell in `gui_app.py`
-- reusable job execution in `vaultwares_studio/`
-- resumable manifests under `data/jobs/`
-- fallback-safe reconstruction outputs when heavyweight tools are missing
-- exported USD, camera previews, and walkthrough MP4
+## M0: Remote Execution Foundation (~8 d)
+StageRunner abstraction (`runners/base.py`): `LocalStageRunner` (Popen streaming + cancel), `HfJobsStageRunner` (run_job + bucket Volumes, poll/cancel, log→progress), `vw-studio-worker` Docker image v1, manifest schema v2 (placement/runner/cost per stage), cost-confirm dialog + spend ledger.
 
-## Milestone 2: Gaussian Splat Pipeline
-Goal: Successfully reconstruct a 3D scene from video and export to PLY with COLMAP / Nerfstudio / gsplat when those tools are installed.
+## M1: Real Reconstruction, Remote (~8 d)
+Worker entrypoint: `ns-process-data` (sequential matching) → `ns-train splatfacto` → `ns-export gaussian-splat`. Quality presets pick flavor (Draft t4/l4 <$1, Standard l4/a10g ~$1, High a10g/a100). Full-attribute splat PLY (`splat_io.py`, stop flattening through Open3D), proper PLY→USD (26.03 schema probe, UsdGeomPoints+primvars fallback).
 
-## Milestone 3: Native OpenUSD Assets
-Goal: Convert PLY to OpenUSD using the 26.03 schema and establish an asset library.
+## M2: Interactive Viewport + Camera Staging (~18 d, local)
+QWebEngineView + vendored GaussianSplats3D (three.js) splat viewer; fly controls; place/aim cameras; keyframe timeline (Catmull-Rom + slerp in `camera_paths.py`); `CameraEntity` → manifest + USD time-sampled xformOps; remote `ns-render camera-path` walkthroughs. Includes `gui/` package split of gui_app.py. Stage rename `usd_cameras` → `camera_staging` (uses NEEDS_USER_INPUT).
 
-## Milestone 4: Real-time Simulation & Robotics
-Goal: Ingest USD assets into Isaac Sim and validate physics/camera navigation.
+## M3: Robot Lab (~16 d)
+`NavSimBackend` interface. Grid-nav backend local (gymnasium + SB3 PPO over occupancy grid, CPU, free). Habitat-Sim backend remote (native Linux in the worker image — no Windows port needed). `sim_export` stage: poisson mesh → trimesh cleanup → occupancy grid + navmesh. Episode replay animated in the splat viewport; Robot Lab GUI tab (train/evaluate/watch).
 
-## Milestone 5: Cosmos AI Enhancement
-Goal: Integrate Cosmos models for automated annotation and photorealistic domain transfer.
+## M4: Cosmos AI Layer (~5 d)
+Cosmos Reason 2-2B annotation as a remote stage (fp16 on 24 GB; local INT4 opt-in) → real `cosmos_annotations.json`; labels become ObjectNav goals. Transfer 2.5 stays scope-boxed to the future 48 GB SSH box.
+
+## M5: Polish & Packaging (~8 d)
+Onboarding wizard (HF token, demo job), actionable error cards, spend dashboard, slim EXE install (heavy venv now optional), docs refresh. EN/QC translation explicitly deferred (lowest priority); strings stay behind `_STRINGS`/`_t()`.
+
+## M6 (optional, deferred): Isaac Sim Bridge
+Remote headless Isaac (48 GB box or a100); USD + physics colliders; Isaac Lab RL out of scope.
+
+## Watch items
+- cuTile / CUDA Tile (`cuda-tile`, CUDA 13.2): kernel-authoring DSL — relevant only if custom splat kernels ever land here.
+
+---
+
+### Legacy milestones (superseded by the plan above)
+M1 Working Local App (done) · M2 Gaussian Splat Pipeline (→ new M1) · M3 Native OpenUSD (→ new M1) · M4 Isaac Sim (→ new M6) · M5 Cosmos (→ new M4)

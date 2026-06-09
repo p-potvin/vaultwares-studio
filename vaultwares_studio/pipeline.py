@@ -15,6 +15,9 @@ from typing import Callable
 from pxr import Gf, Sdf, Usd, UsdGeom, UsdLux
 
 from .camera_director import build_camera_bundle
+from .runners import CancelToken, LocalStageRunner, StageRunner
+
+MANIFEST_SCHEMA_VERSION = 2
 
 ROOT = Path(__file__).resolve().parent.parent
 DATA_DIR = ROOT / "data"
@@ -75,6 +78,14 @@ class StageRecord:
     message: str = ""
     artifacts: list[ArtifactRecord] = field(default_factory=list)
     metadata: dict = field(default_factory=dict)
+    # Schema v2: where this stage prefers to execute ("local" | "remote"),
+    # which runner executed it, runner parameters, and cost records for
+    # paid remote runs. Remote placement is honored once a remote runner is
+    # configured (M1+); until then execution falls back to local handlers.
+    placement: str = "local"
+    runner: str = "local"
+    params: dict = field(default_factory=dict)
+    cost: dict = field(default_factory=dict)
 
     def to_dict(self) -> dict:
         payload = asdict(self)
@@ -97,6 +108,8 @@ class JobManifest:
     stages: list[StageRecord]
     created_at: str
     updated_at: str
+    schema_version: int = MANIFEST_SCHEMA_VERSION
+    spend_ledger: list[dict] = field(default_factory=list)
 
     def to_dict(self) -> dict:
         payload = asdict(self)
@@ -105,6 +118,12 @@ class JobManifest:
 
     @classmethod
     def from_dict(cls, payload: dict) -> "JobManifest":
+        # v1 manifests (no schema_version) migrate with additive defaults:
+        # stages gain placement/runner/params/cost from the stage definitions.
+        is_v1 = "schema_version" not in payload
+        default_placements = {
+            definition.key: definition.default_placement for definition in STAGE_DEFINITIONS
+        }
         stages = [
             StageRecord(
                 key=stage["key"],
@@ -116,6 +135,13 @@ class JobManifest:
                     ArtifactRecord(**artifact) for artifact in stage.get("artifacts", [])
                 ],
                 metadata=stage.get("metadata", {}),
+                placement=stage.get(
+                    "placement",
+                    default_placements.get(stage["key"], "local") if is_v1 else "local",
+                ),
+                runner=stage.get("runner", "local"),
+                params=stage.get("params", {}),
+                cost=stage.get("cost", {}),
             )
             for stage in payload["stages"]
         ]
@@ -133,6 +159,8 @@ class JobManifest:
             stages=stages,
             created_at=payload["created_at"],
             updated_at=payload["updated_at"],
+            schema_version=MANIFEST_SCHEMA_VERSION,
+            spend_ledger=payload.get("spend_ledger", []),
         )
 
 
@@ -141,6 +169,9 @@ class StageDefinition:
     key: str
     title: str
     description: str
+    # "remote" stages run on rented GPU compute (HF Jobs) once a remote
+    # runner is configured; everything else stays on the local machine.
+    default_placement: str = "local"
 
 
 STAGE_DEFINITIONS = [
@@ -158,6 +189,7 @@ STAGE_DEFINITIONS = [
         "reconstruction",
         "Reconstruction",
         "Run COLMAP / Nerfstudio / gsplat or fall back to placeholder-safe outputs.",
+        default_placement="remote",
     ),
     StageDefinition(
         "usd_cameras",
@@ -234,7 +266,12 @@ def create_job_manifest(
     output_dir = (JOBS_DIR / job_id).resolve()
     output_dir.mkdir(parents=True, exist_ok=True)
     stages = [
-        StageRecord(key=stage.key, title=stage.title, description=stage.description)
+        StageRecord(
+            key=stage.key,
+            title=stage.title,
+            description=stage.description,
+            placement=stage.default_placement,
+        )
         for stage in STAGE_DEFINITIONS
     ]
     manifest = JobManifest(
@@ -308,11 +345,34 @@ def stage_dependencies_complete(manifest: JobManifest, stage_key: str) -> bool:
     raise KeyError(stage_key)
 
 
+def record_spend(manifest: JobManifest, stage_key: str, cost_metadata: dict) -> None:
+    """Append a paid-run record to the manifest's spend ledger and persist it."""
+    entry = {"stage": stage_key, "recorded_at": _now(), **cost_metadata}
+    manifest.spend_ledger.append(entry)
+    for stage in manifest.stages:
+        if stage.key == stage_key:
+            stage.cost = cost_metadata
+            break
+    save_job_manifest(manifest)
+
+
 class DigitalTwinStudioRunner:
-    def __init__(self, manifest: JobManifest, log: Callable[[str], None], strict_mode: bool = False):
+    def __init__(
+        self,
+        manifest: JobManifest,
+        log: Callable[[str], None],
+        strict_mode: bool = False,
+        local_runner: LocalStageRunner | None = None,
+        remote_runner: StageRunner | None = None,
+    ):
         self.manifest = manifest
         self.log = log
         self.strict_mode = strict_mode
+        self.local_runner = local_runner or LocalStageRunner()
+        # Remote runner (HF Jobs / SSH GPU). Stages with placement == "remote"
+        # delegate to it starting in M1; until then it is carried but unused.
+        self.remote_runner = remote_runner
+        self.cancel_token = CancelToken()
         self.root = Path(manifest.output_dir)
         self.frames_dir = self.root / "frames"
         self.recon_dir = self.root / "reconstruction"
@@ -760,21 +820,16 @@ class DigitalTwinStudioRunner:
             encoding="utf-8",
         )
 
+    def cancel(self) -> None:
+        """Request cancellation of the currently running stage command."""
+        self.cancel_token.cancel()
+
     def _run_command(self, cmd: list[str], error_message: str, timeout_seconds: int, env: dict[str, str] | None = None) -> None:
-        self.log(f"Running: {' '.join(cmd)}")
-        completed = subprocess.run(
+        self.local_runner.run_command(
             cmd,
-            check=False,
-            capture_output=True,
-            text=True,
-            encoding="utf-8",
-            errors="replace",
-            timeout=timeout_seconds,
+            error_message=error_message,
+            timeout_seconds=timeout_seconds,
+            log=self.log,
             env=env,
+            cancel=self.cancel_token,
         )
-        if completed.stdout:
-            self.log(completed.stdout.strip())
-        if completed.stderr:
-            self.log(completed.stderr.strip())
-        if completed.returncode != 0:
-            raise RuntimeError(f"{error_message} (exit code={completed.returncode})")

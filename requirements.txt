@@ -149,3 +149,5 @@ redis>=5.0.0
 PySide6==6.7.2
 PySide6-Fluent-Widgets>=1.11.0
 pycolmap>=4.0.0
+psutil>=5.9.0              # process-tree cancel for streamed stage commands
+keyring>=25.0.0            # HF token storage in the OS credential manager

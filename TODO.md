@@ -1,36 +1,34 @@
-# Project: USD Digital Twin Playground
+# Project: VaultWares Studio
 
-## Phase 0: Infrastructure & Setup
+Plan of record: `docs/plans/plan-v1-remote-first-20260609.md` (M0–M6). Legacy phases below are kept for history.
 
-- [x] Integrate `vaultwares-adk` framework
-- [x] Add NVIDIA Cosmos submodules (`cosmos-reason2`, `cosmos-transfer2.5`)
-- [x] Refactor pipeline to event-driven orchestrator (`run_pipeline_demo.py`)
-- [x] Add desktop app shell with direct `vaultwares_studio` execution
-- [x] Add resumable job manifests under `data/jobs/`
-- [x] Add open latest/open manifest job resume controls
+## M0: Remote Execution Foundation
 
-## Phase 1: Capture & Reconstruction
+- [x] `StageRunner` abstraction (`vaultwares_studio/runners/base.py`): StageContext, StageResult, CancelToken, cost estimates
+- [x] `LocalStageRunner`: Popen line-streamed output, cancel (psutil process-tree kill), timeout
+- [x] `HfJobsStageRunner`: consent gate before any network call, dataset-repo artifact transport (`jobs/<id>/<stage>/{in,out}`), launch/poll/cancel (≥10 s poll), log fetch, output download
+- [x] Manifest schema v2: `schema_version`, per-stage `placement`/`runner`/`params`/`cost`, `spend_ledger`, v1 migration on load
+- [x] `record_spend()` ledger helper
+- [x] `pipeline._run_command` delegates to LocalStageRunner (live logs + cancel)
+- [x] Stage placement defaults (reconstruction → remote; honored from M1)
+- [x] Worker image v1: `docker/worker/Dockerfile` (COLMAP + nerfstudio + hub) + `vw_stage.py` + `tools/build_worker_image.ps1`
+- [x] GUI Settings: HF token (OS keyring), artifact repo, default flavor, cost-confirm dialog, echo-test button
+- [x] Tests: runner streaming/cancel/timeout, cost-denial, config round-trip, manifest v2 migration, spend ledger (19 passing)
+- [ ] Live verification: echo job round-trip on `cpu-basic` (needs HF token; run from Settings → "Run Echo Test Job")
+- [ ] Build & push `vw-studio-worker:0.1` to Docker Hub (needed before M1 remote reconstruction)
 
-- [x] Capture test video (simulated with `test_input.mp4`)
-- [x] Extract frames using ffmpeg
-- [ ] Run COLMAP SfM for camera pose estimation
-- [ ] Train Gaussian Splat model (gsplat/3DGRUT)
-- [x] Export fallback-safe PLY when heavyweight reconstruction tools are missing
+## M1: Real Reconstruction, Remote — next
 
-## Phase 2: USD Conversion & Authoring
+- [ ] Worker recon entrypoint: ns-process-data (sequential) → ns-train splatfacto → ns-export gaussian-splat
+- [ ] Quality presets (Draft/Standard/High) with flavor + cost estimates
+- [ ] Full-attribute splat PLY (`splat_io.py`) — stop flattening through Open3D
+- [ ] PLY→USD: 26.03 schema probe, UsdGeomPoints+primvars fallback
+- [ ] Remote-stage wiring for `reconstruction` (placement honored)
 
-- [ ] Convert PLY to OpenUSD (26.03 schema)
-- [x] Compose scene in USD (add lights, floor)
-- [x] Validate USD structure in smoke tests
+## M2+: see plan file (viewport/staging, Robot Lab, Cosmos, packaging)
 
-## Phase 3: Isaac Sim Integration
+---
 
-- [ ] Load USD scene into Isaac Sim
-- [ ] Add navigation cameras
-- [ ] (Optional) Import robot (URDF -> USD)
-- [ ] Generate synthetic data with Replicator
+### Legacy phases (pre-plan history)
 
-## Phase 4: Cosmos Augmentation
-
-- [ ] Scene annotation with Cosmos Reason 2
-- [ ] Domain transfer with Cosmos Transfer 2.5
+Phase 0 Infrastructure — complete. Phase 1 Capture & Reconstruction — frames/fallback PLY done; COLMAP SfM + gsplat training move to M1 (remote). Phase 2 USD — composition + smoke tests done; PLY→USD 26.03 moves to M1. Phase 3 Isaac Sim — deferred to M6. Phase 4 Cosmos — moves to M4.

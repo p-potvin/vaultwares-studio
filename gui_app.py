@@ -18,6 +18,7 @@ from PySide6.QtWidgets import (
     QListWidget,
     QListWidgetItem,
     QMainWindow,
+    QMessageBox,
     QProgressBar,
     QPushButton,
     QScrollArea,
@@ -113,6 +114,14 @@ from vaultwares_studio.integration import (
     export_vaultflows_workflow,
     push_workflow_to_vaultwares,
     test_vaultwares_api,
+)
+from vaultwares_studio.runners import (
+    FLAVOR_RATES_USD_PER_HOUR,
+    HfJobsConfig,
+    estimate_cost,
+    get_hf_token,
+    run_echo_smoke_test,
+    set_hf_token,
 )
 from vaultwares_studio.viewer import open_live_viewer
 
@@ -455,6 +464,18 @@ _STRINGS: dict[str, dict[str, str]] = {
                               "QC": "Aucune vidéo de visite n'a encore été générée."},
     "strict_off":            {"EN": "Strict mode: OFF",                        "QC": "Mode strict : OFF"},
     "strict_on":             {"EN": "Strict mode: ON",                         "QC": "Mode strict : ON"},
+    "remote_title":          {"EN": "Remote Compute (Hugging Face Jobs)",      "QC": "Calcul à distance (Hugging Face Jobs)"},
+    "hf_token_label":        {"EN": "HF Token (stored in OS keyring)",         "QC": "Jeton HF (stocké dans le trousseau)"},
+    "hf_repo_label":         {"EN": "Artifact dataset repo (blank = auto)",    "QC": "Dépôt d'artéfacts (vide = auto)"},
+    "hf_flavor_label":       {"EN": "Default GPU flavor",                      "QC": "Type de GPU par défaut"},
+    "save_remote":           {"EN": "Save Remote Settings",                    "QC": "Enregistrer les paramètres"},
+    "test_remote":           {"EN": "Run Echo Test Job (cpu-basic)",           "QC": "Tester avec un travail écho (cpu-basic)"},
+    "remote_cost_title":     {"EN": "Confirm paid remote job",                 "QC": "Confirmer le travail payant"},
+    "remote_cost_body":      {"EN": "This will launch a paid Hugging Face Job:\n{estimate}\n\nProceed?",
+                              "QC": "Ceci lancera un travail Hugging Face payant :\n{estimate}\n\nContinuer ?"},
+    "remote_saved":          {"EN": "Remote settings saved.",                  "QC": "Paramètres enregistrés."},
+    "remote_no_token":       {"EN": "No HF token configured. Paste your token and save first.",
+                              "QC": "Aucun jeton HF configuré. Collez votre jeton et enregistrez d'abord."},
 }
 
 
@@ -481,6 +502,8 @@ def _open_path(path: Path) -> None:
 
 class SettingsTab(QFrame):
     theme_changed = Signal(object)
+    remote_log = Signal(str)
+    remote_test_done = Signal()
 
     def __init__(self, parent: QWidget | None = None):
         super().__init__(parent=parent)
@@ -543,10 +566,101 @@ class SettingsTab(QFrame):
         layout.addLayout(theme_row)
         # --- end theme picker ---
 
+        # --- remote compute (Hugging Face Jobs) ---
+        self._remote_config = HfJobsConfig.load()
+        self.remote_title_label = SubtitleLabel(_t("remote_title"), inner)
+        layout.addWidget(self.remote_title_label)
+
+        self.hf_token_label = BodyLabel(_t("hf_token_label"), inner)
+        layout.addWidget(self.hf_token_label)
+        self.hf_token_edit = QLineEdit(inner)
+        self.hf_token_edit.setEchoMode(QLineEdit.EchoMode.Password)
+        if get_hf_token():
+            self.hf_token_edit.setPlaceholderText("•••••••• (token already stored)")
+        layout.addWidget(self.hf_token_edit)
+
+        self.hf_repo_label = BodyLabel(_t("hf_repo_label"), inner)
+        layout.addWidget(self.hf_repo_label)
+        self.hf_repo_edit = QLineEdit(inner)
+        self.hf_repo_edit.setText(self._remote_config.artifact_repo)
+        layout.addWidget(self.hf_repo_edit)
+
+        flavor_row = QHBoxLayout()
+        self.hf_flavor_label = BodyLabel(_t("hf_flavor_label"), inner)
+        flavor_row.addWidget(self.hf_flavor_label)
+        self.hf_flavor_combo = ComboBox(inner)
+        for flavor in FLAVOR_RATES_USD_PER_HOUR:
+            self.hf_flavor_combo.addItem(flavor)
+        self.hf_flavor_combo.setCurrentText(self._remote_config.default_flavor)
+        flavor_row.addWidget(self.hf_flavor_combo, 1)
+        layout.addLayout(flavor_row)
+
+        self.save_remote_btn = PrimaryPushButton(FIF.SAVE, _t("save_remote"), inner)
+        layout.addWidget(self.save_remote_btn)
+        self.test_remote_btn = PrimaryPushButton(FIF.SYNC, _t("test_remote"), inner)
+        layout.addWidget(self.test_remote_btn)
+
+        self.remote_log_view = TextEdit(inner)
+        self.remote_log_view.setReadOnly(True)
+        self.remote_log_view.setMinimumHeight(120)
+        layout.addWidget(self.remote_log_view)
+        # --- end remote compute ---
+
         layout.addStretch(1)
         self.refresh_btn.clicked.connect(self.refresh_dependency_health)
         self.theme_combo.currentIndexChanged.connect(self._on_theme_changed)
+        self.save_remote_btn.clicked.connect(self._save_remote_settings)
+        self.test_remote_btn.clicked.connect(self._start_echo_test)
+        self.remote_log.connect(self._append_remote_log)
+        self.remote_test_done.connect(lambda: self.test_remote_btn.setEnabled(True))
         self.refresh_dependency_health()
+
+    def _collect_remote_config(self) -> HfJobsConfig:
+        self._remote_config.artifact_repo = self.hf_repo_edit.text().strip()
+        self._remote_config.default_flavor = self.hf_flavor_combo.currentText()
+        return self._remote_config
+
+    def _save_remote_settings(self) -> None:
+        token = self.hf_token_edit.text().strip()
+        if token:
+            set_hf_token(token)
+            self.hf_token_edit.clear()
+            self.hf_token_edit.setPlaceholderText("•••••••• (token already stored)")
+        config = self._collect_remote_config()
+        config.enabled = True
+        config.save()
+        self._append_remote_log(_t("remote_saved"))
+
+    def _start_echo_test(self) -> None:
+        if not get_hf_token():
+            self._append_remote_log(_t("remote_no_token"))
+            return
+        config = self._collect_remote_config()
+        estimate = estimate_cost("cpu-basic", 5)
+        answer = QMessageBox.question(
+            self,
+            _t("remote_cost_title"),
+            _t("remote_cost_body").format(estimate=estimate.summary()),
+        )
+        if answer != QMessageBox.StandardButton.Yes:
+            return
+        self.test_remote_btn.setEnabled(False)
+        # Consent was given via the dialog above (GUI thread); the runner's
+        # confirm hook is satisfied with a pre-confirmed callback so no
+        # dialog has to cross threads.
+        threading.Thread(target=self._echo_worker, args=(config,), daemon=True).start()
+
+    def _echo_worker(self, config: HfJobsConfig) -> None:
+        try:
+            summary = run_echo_smoke_test(config, confirm_cost=lambda _e: True, log=self.remote_log.emit)
+            self.remote_log.emit(summary)
+        except Exception as exc:  # noqa: BLE001 - surfaced to the log panel
+            self.remote_log.emit(f"Echo test failed: {exc}")
+        finally:
+            self.remote_test_done.emit()
+
+    def _append_remote_log(self, message: str) -> None:
+        self.remote_log_view.append(message)
 
     def set_mode(self, strict_mode: bool) -> None:
         self._strict_mode = strict_mode
@@ -577,6 +691,12 @@ class SettingsTab(QFrame):
         self.refresh_btn.setText(_t("refresh_health"))
         self.health_title_label.setText(_t("health_title"))
         self.theme_label_widget.setText(_t("theme_label"))
+        self.remote_title_label.setText(_t("remote_title"))
+        self.hf_token_label.setText(_t("hf_token_label"))
+        self.hf_repo_label.setText(_t("hf_repo_label"))
+        self.hf_flavor_label.setText(_t("hf_flavor_label"))
+        self.save_remote_btn.setText(_t("save_remote"))
+        self.test_remote_btn.setText(_t("test_remote"))
 
 
 class DashboardWidget(QFrame):
