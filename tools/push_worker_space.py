@@ -61,13 +61,14 @@ def main() -> int:
         repo_id=repo_id,
         repo_type="space",
     )
-    for name in ("Dockerfile", "vw_stage.py", "recon_entrypoint.py"):
-        api.upload_file(
-            path_or_fileobj=str(WORKER_DIR / name),
-            path_in_repo=name,
-            repo_id=repo_id,
-            repo_type="space",
-        )
+    for source in sorted(WORKER_DIR.iterdir()):
+        if source.is_file():
+            api.upload_file(
+                path_or_fileobj=str(source),
+                path_in_repo=source.name,
+                repo_id=repo_id,
+                repo_type="space",
+            )
     print(f"Pushed worker files to https://huggingface.co/spaces/{repo_id}")
     print(f"Job image reference: hf.co/spaces/{repo_id}")
     runtime = api.get_space_runtime(repo_id)
