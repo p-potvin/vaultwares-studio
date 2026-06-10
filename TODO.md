@@ -27,7 +27,7 @@ Plan of record: `docs/plans/plan-v1-remote-first-20260609.md` (M0–M6). Legacy 
 - [x] Remote log streaming with nerfstudio % progress parsing in HfJobsStageRunner
 - [x] GUI: quality-preset dropdown on the Studio tab; pre-run cost-confirm dialog for remote reconstruction; viewer prefers `cloud_preview.ply`
 - [x] Tests: splat round-trip/USD, presets, fake-remote reconstruction wiring (30 passing)
-- [ ] Live verification: real remote reconstruction on a room video (needs HF token + worker image pushed)
+- [x] Live verification (2026-06-10): backyard_99s_cloudy.mp4 → 280/280 registered (CPU SIFT), 477,731 gaussians (draft, l4x1, $0.36), cloud.ply 107MB + preview + USD + model.zip checkpoint. Bugs found and fixed along the way: container GPU-SIFT garbage, --vis none removal, HfHubHTTPError fallback bypass, private-Space image 500
 - [ ] OOM auto-retry at next-lower preset (deferred — needs mid-run confirm UX; failures currently suggest a lower preset)
 
 ## M2: Interactive Viewport + Camera Staging (in progress)
