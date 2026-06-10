@@ -57,6 +57,35 @@ def filter_supported_flags(train_args: list[str]) -> list[str]:
     return kept
 
 
+def colmap_db_stats(processed_dir: Path) -> dict:
+    """Keypoint/match telemetry from COLMAP's database — pinpoints WHERE SfM starves."""
+    import sqlite3
+
+    db_path = next(processed_dir.rglob("database.db"), None)
+    if db_path is None:
+        return {}
+    try:
+        con = sqlite3.connect(db_path)
+        kp_count, kp_avg = con.execute("SELECT COUNT(*), AVG(rows) FROM keypoints").fetchone()
+        match_pairs, match_avg = con.execute(
+            "SELECT COUNT(*), AVG(rows) FROM matches WHERE rows > 0"
+        ).fetchone()
+        verified_pairs, verified_avg = con.execute(
+            "SELECT COUNT(*), AVG(rows) FROM two_view_geometries WHERE rows > 0"
+        ).fetchone()
+        con.close()
+        return {
+            "images_with_keypoints": kp_count,
+            "avg_keypoints": round(kp_avg or 0, 1),
+            "raw_match_pairs": match_pairs,
+            "avg_raw_matches": round(match_avg or 0, 1),
+            "verified_pairs": verified_pairs,
+            "avg_verified_matches": round(verified_avg or 0, 1),
+        }
+    except Exception as exc:  # noqa: BLE001
+        return {"db_stats_error": str(exc)}
+
+
 def count_registered_images(processed_dir: Path) -> int:
     transforms = processed_dir / "transforms.json"
     if not transforms.exists():
@@ -118,13 +147,19 @@ def main() -> int:  # noqa: PLR0911, PLR0915
             "--output-dir", str(processed),
             "--matching-method", matching,
             "--num-downscales", "3",
+            # CPU SIFT: COLMAP's GPU feature path fails silently in the L4
+            # job container (3 videos x ~3 registered with thousands of
+            # locally-verified inliers). CPU costs minutes, not correctness.
+            "--no-gpu",
         ])
         timings[f"process_data_{matching}_s"] = round(time.monotonic() - started, 1)
         if process.returncode != 0:
             return fail(out_dir, "process_data_failed", f"ns-process-data exit {process.returncode}")
         registered = count_registered_images(processed)
         matching_used = matching
+        stats = colmap_db_stats(processed)
         print(f"[recon] registered images ({matching}): {registered}/{frame_count}", flush=True)
+        print(f"[recon] colmap db stats: {json.dumps(stats)}", flush=True)
         if registered >= MIN_REGISTERED_IMAGES:
             break
 
