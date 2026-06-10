@@ -52,10 +52,19 @@ async function main() {
     return;
   }
 
+  // Scene framing computed Python-side from the preview cloud.
+  const center = ['cx', 'cy', 'cz'].map((k) => parseFloat(params.get(k)));
+  const radius = parseFloat(params.get('r'));
+  const framed = center.every(Number.isFinite) && Number.isFinite(radius);
+  const lookAt = framed ? center : [0, 0, 0];
+  const position = framed
+    ? [center[0], center[1] + radius * 0.4, center[2] + radius * 1.2]
+    : [0, 1.5, 4];
+
   viewer = new GaussianSplats3D.Viewer({
     cameraUp: [0, 1, 0],
-    initialCameraPosition: [0, 1.5, 4],
-    initialCameraLookAt: [0, 0, 0],
+    initialCameraPosition: position,
+    initialCameraLookAt: lookAt,
     // No COOP/COEP headers on the custom scheme, so SharedArrayBuffer is
     // unavailable — sort on the main worker without shared memory.
     sharedMemoryForWorkers: false,
@@ -68,11 +77,15 @@ async function main() {
       format: GaussianSplats3D.SceneFormat.Ply,
       progressiveLoad: true,
       showLoadingUI: true,
+      onProgress: (pct, label, stage) => {
+        if (pct !== undefined && pct !== null) setStatus(`Loading splats: ${Math.round(pct)}%`);
+      },
     });
     viewer.start();
     setStatus('Scene loaded — drag to orbit, scroll to zoom, WASD to fly.');
   } catch (error) {
     setStatus(`Failed to load scene: ${error.message || error}`);
+    console.error(error);
   }
   if (bridge) bridge.viewerReady();
 }

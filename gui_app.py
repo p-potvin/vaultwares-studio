@@ -1606,6 +1606,14 @@ if __name__ == "__main__":
     if sys.stderr.encoding != "utf-8":
         sys.stderr.reconfigure(encoding="utf-8")  # type: ignore[attr-defined]
 
+    # Allow Chromium's software WebGL fallback (SwiftShader): without it the
+    # splat viewport gets no WebGL context in RDP/VM/headless sessions where
+    # GPU compositing is unavailable. Harmless when a real GPU is present.
+    _chromium_flags = os.environ.get("QTWEBENGINE_CHROMIUM_FLAGS", "")
+    if "--enable-unsafe-swiftshader" not in _chromium_flags:
+        os.environ["QTWEBENGINE_CHROMIUM_FLAGS"] = (
+            f"{_chromium_flags} --enable-unsafe-swiftshader".strip()
+        )
     register_viewer_scheme()  # must precede QApplication construction
     app = QApplication(sys.argv)
     font = QFont("Segoe UI Semilight", 10)
