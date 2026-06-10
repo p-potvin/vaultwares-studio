@@ -44,6 +44,17 @@ def filter_supported_flags(train_args: list[str]) -> list[str]:
         help_text = probe.stdout + probe.stderr
     if not help_text:
         return train_args
+    # Value drift, not just flag drift: newer nerfstudio removed the 'none'
+    # choice for --vis; tensorboard is the headless-safe choice everywhere.
+    if "--vis" in train_args:
+        index = train_args.index("--vis") + 1
+        import re
+
+        window = re.search(r"--vis\b(.{0,300})", help_text, re.DOTALL)
+        choices = window.group(1) if window else ""
+        if index < len(train_args) and train_args[index] == "none" and "none" not in choices:
+            print("[recon] --vis none unsupported in this nerfstudio; using tensorboard", flush=True)
+            train_args[index] = "tensorboard"
     kept: list[str] = []
     index = 0
     while index < len(train_args):
