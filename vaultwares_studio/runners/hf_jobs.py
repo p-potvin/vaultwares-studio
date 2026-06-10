@@ -67,16 +67,21 @@ out_dir = work / "out"
 in_dir.mkdir(parents=True, exist_ok=True)
 out_dir.mkdir(parents=True, exist_ok=True)
 
+patterns = [cfg["prefix"] + "/in/*"] + cfg.get("extra_inputs", [])
 snapshot_download(
     repo_id=cfg["repo"],
     repo_type="dataset",
-    allow_patterns=[cfg["prefix"] + "/in/*"],
+    allow_patterns=patterns,
     local_dir=str(work / "dl"),
 )
 staged = work / "dl" / cfg["prefix"] / "in"
 if staged.exists():
     for item in staged.iterdir():
         item.replace(in_dir / item.name)
+for extra in cfg.get("extra_inputs", []):
+    source = work / "dl" / extra
+    if source.is_file():
+        source.replace(in_dir / source.name)
 
 env = dict(os.environ)
 env["VW_IN"] = str(in_dir)
@@ -218,6 +223,9 @@ class HfJobsStageRunner(StageRunner):
             "repo": repo,
             "prefix": prefix,
             "command": ctx.params["command"],
+            # Repo-relative paths pulled into VW_IN directly from the artifact
+            # dataset — large artifacts (checkpoints) need not be re-uploaded.
+            "extra_inputs": ctx.params.get("extra_repo_inputs", []),
         }
         image = ctx.params.get("image", self.config.worker_image)
         if ctx.params.get("image_has_hub", False):

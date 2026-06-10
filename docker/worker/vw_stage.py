@@ -47,16 +47,21 @@ def main() -> int:
     in_dir.mkdir(parents=True, exist_ok=True)
     out_dir.mkdir(parents=True, exist_ok=True)
 
+    patterns = [cfg["prefix"] + "/in/*"] + cfg.get("extra_inputs", [])
     snapshot_download(
         repo_id=cfg["repo"],
         repo_type="dataset",
-        allow_patterns=[cfg["prefix"] + "/in/*"],
+        allow_patterns=patterns,
         local_dir=str(work / "dl"),
     )
     staged = work / "dl" / cfg["prefix"] / "in"
     if staged.exists():
         for item in staged.iterdir():
             item.replace(in_dir / item.name)
+    for extra in cfg.get("extra_inputs", []):
+        source = work / "dl" / extra
+        if source.is_file():
+            source.replace(in_dir / source.name)
 
     env = dict(os.environ)
     env["VW_IN"] = str(in_dir)

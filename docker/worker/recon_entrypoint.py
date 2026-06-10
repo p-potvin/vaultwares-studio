@@ -218,10 +218,16 @@ def main() -> int:  # noqa: PLR0911, PLR0915
     shutil.copyfile(plys[0], out_dir / "splat.ply")
 
     if args.keep_checkpoint:
-        run_dir = configs[0].parent
-        archive_base = str(out_dir / "model")
-        shutil.make_archive(archive_base, "zip", root_dir=str(run_dir))
-        print("[recon] checkpoint archived to model.zip", flush=True)
+        # Whole train tree (config.yml references absolute /tmp/recon paths;
+        # the render job recreates the same layout) + the processed-dataset
+        # essentials the dataparser needs at eval time.
+        shutil.make_archive(str(out_dir / "model"), "zip", root_dir=str(train_out))
+        with zipfile.ZipFile(out_dir / "processed_min.zip", "w", zipfile.ZIP_DEFLATED) as archive:
+            for name in ("transforms.json", "sparse_pc.ply"):
+                candidate = processed / name
+                if candidate.exists():
+                    archive.write(candidate, name)
+        print("[recon] checkpoint archived (model.zip + processed_min.zip)", flush=True)
 
     (out_dir / "summary.json").write_text(
         json.dumps(

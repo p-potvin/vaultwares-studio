@@ -30,6 +30,7 @@ RUN ln -sf "$(command -v python3)" /usr/local/bin/python \
 COPY vw_stage.py /opt/vw/vw_stage.py
 # Stage entrypoints invoked by the bootstrap's stage command.
 COPY recon_entrypoint.py /opt/vw/recon_entrypoint.py
+COPY render_entrypoint.py /opt/vw/render_entrypoint.py
 
 WORKDIR /workspace
 CMD ["python", "/opt/vw/vw_stage.py"]

@@ -15,6 +15,14 @@ from typing import Callable
 from pxr import Gf, Sdf, Usd, UsdGeom, UsdLux
 
 from .camera_director import build_camera_bundle
+from .camera_paths import (
+    CameraEntity,
+    CameraKeyframe,
+    author_usd_camera,
+    build_visit_path,
+    load_captured_entities,
+    to_nerfstudio_camera_path,
+)
 from .presets import get_preset
 from .runners import (
     CancelToken,
@@ -416,7 +424,9 @@ class DigitalTwinStudioRunner:
         self.recon_preview_ply_path = self.recon_dir / "cloud_preview.ply"
         self.usd_stage_path = self.usd_dir / "digital_twin_scene.usda"
         self.camera_plan_path = self.usd_dir / "camera_plan.json"
+        self.camera_render_path = self.usd_dir / "camera_path.json"
         self.walkthrough_path = self.deliverables_dir / "digital_twin_walkthrough.mp4"
+        self.splat_walkthrough_path = self.deliverables_dir / "walkthrough.mp4"
 
     def stage_for(self, stage_key: str) -> StageRecord:
         for stage in self.manifest.stages:
@@ -765,26 +775,99 @@ class DigitalTwinStudioRunner:
             twin.GetPrim().GetReferences().AddReference(str(self.recon_stage_path))
 
         bundle = build_camera_bundle(str(self.manifest.metadata.get("cameraPrompt", DEFAULT_CAMERA_PROMPT)))
-        navigation = UsdGeom.Xform.Define(stage_path, "/World/Navigation")
+        UsdGeom.Xform.Define(stage_path, "/World/Navigation")
+
+        center = self._scene_center()
+        entities: list[CameraEntity] = []
         for shot in bundle["allShots"]:
-            shot_path = f"/World/Navigation/{_slugify(shot['name'])}"
-            camera = UsdGeom.Camera.Define(stage_path, shot_path)
-            camera.AddTranslateOp().Set(Gf.Vec3f(*shot["position"]))
-            camera.GetFocalLengthAttr().Set(24.0)
-            camera.GetHorizontalApertureAttr().Set(36.0)
-            camera.GetClippingRangeAttr().Set(Gf.Vec2f(0.1, 10000.0))
-            camera.GetPrim().CreateAttribute("shotDescription", Sdf.ValueTypeNames.String, custom=True).Set(shot["description"])
-            camera.GetPrim().CreateAttribute("shotSource", Sdf.ValueTypeNames.String, custom=True).Set(shot["source"])
+            entities.append(
+                CameraEntity(
+                    name=shot["name"],
+                    source=shot["source"],
+                    keyframes=[
+                        CameraKeyframe(t=0.0, position=list(shot["position"]), look_at=list(center))
+                    ],
+                )
+            )
+        captured = load_captured_entities(Path(self.manifest.output_dir) / "usd" / "captured_cameras.json")
+        entities.extend(captured)
+        visit_path = build_visit_path(captured)
+        if visit_path is not None:
+            entities.append(visit_path)
+
+        for entity in entities:
+            author_usd_camera(stage_path, f"/World/Navigation/{_slugify(entity.name)}", entity)
         stage_path.GetRootLayer().Save()
 
-        self.camera_plan_path.write_text(json.dumps(bundle, indent=2), encoding="utf-8")
+        # The render path: user-authored walkthrough when captures exist,
+        # otherwise a gentle orbit around the scene.
+        path_entity = visit_path or self._default_orbit_path(center)
+        self.camera_render_path.write_text(
+            json.dumps(to_nerfstudio_camera_path(path_entity), indent=2), encoding="utf-8"
+        )
+        self.manifest.metadata["cameras"] = [entity.to_dict() for entity in entities]
+        self.camera_plan_path.write_text(
+            json.dumps({**bundle, "entities": self.manifest.metadata["cameras"]}, indent=2),
+            encoding="utf-8",
+        )
         preview_paths = self._render_camera_previews(bundle["allShots"])
-        stage.metadata = {"cameraCount": len(bundle["allShots"])}
-        stage.message = f"USD stage composed with {len(bundle['allShots'])} camera shots."
+        stage.metadata = {
+            "cameraCount": len(entities),
+            "capturedCount": len(captured),
+            "renderPath": path_entity.name,
+        }
+        stage.message = (
+            f"USD stage composed with {len(entities)} cameras "
+            f"({len(captured)} captured); render path: {path_entity.name}."
+        )
         self._add_artifact(stage, "USD Stage", "usd", self.usd_stage_path, "Composed digital twin stage.")
-        self._add_artifact(stage, "Camera Plan", "json", self.camera_plan_path, "Preset and prompt camera plan.")
+        self._add_artifact(stage, "Camera Plan", "json", self.camera_plan_path, "Cameras and paths.")
+        self._add_artifact(stage, "Render Camera Path", "json", self.camera_render_path, "ns-render camera path.")
         for index, preview in enumerate(preview_paths[:3], start=1):
             self._add_artifact(stage, f"Camera Preview {index}", "image", preview, "Generated camera preview.")
+
+    def _scene_center(self) -> list[float]:
+        """Robust centroid of the reconstruction (preview cloud percentiles)."""
+        try:
+            import numpy as np
+            from plyfile import PlyData
+
+            vertex = PlyData.read(str(self.recon_preview_ply_path))["vertex"]
+            points = np.stack([vertex["x"], vertex["y"], vertex["z"]], axis=1)
+            low, high = np.percentile(points, [5, 95], axis=0)
+            return [float(v) for v in (low + high) / 2]
+        except Exception:  # noqa: BLE001 - placeholder scenes have no preview
+            return [0.0, 0.0, 0.0]
+
+    def _default_orbit_path(self, center: list[float], seconds: float = 12.0) -> CameraEntity:
+        import math
+
+        try:
+            import numpy as np
+            from plyfile import PlyData
+
+            vertex = PlyData.read(str(self.recon_preview_ply_path))["vertex"]
+            points = np.stack([vertex["x"], vertex["y"], vertex["z"]], axis=1)
+            low, high = np.percentile(points, [5, 95], axis=0)
+            radius = float(np.linalg.norm(high - low) / 2) or 2.0
+        except Exception:  # noqa: BLE001
+            radius = 2.0
+        keyframes = []
+        stops = 9  # closed loop: last == first heading
+        for index in range(stops):
+            angle = 2 * math.pi * index / (stops - 1)
+            keyframes.append(
+                CameraKeyframe(
+                    t=seconds * index / (stops - 1),
+                    position=[
+                        center[0] + radius * 0.9 * math.cos(angle),
+                        center[1] + radius * 0.35,
+                        center[2] + radius * 0.9 * math.sin(angle),
+                    ],
+                    look_at=list(center),
+                )
+            )
+        return CameraEntity(name="Scene Orbit", source="preset", keyframes=keyframes)
 
     def _run_cosmos_output(self, stage: StageRecord) -> None:
         self.cosmos_dir.mkdir(parents=True, exist_ok=True)
@@ -810,12 +893,80 @@ class DigitalTwinStudioRunner:
             f"Source stage: {self.usd_stage_path}\n",
             encoding="utf-8",
         )
-        self._build_walkthrough_video()
-        self.manifest.walkthrough_video = str(self.walkthrough_path)
-        stage.message = "Cosmos artifacts written and walkthrough video rendered."
+        rendered_remotely = False
+        if self.remote_runner is not None:
+            try:
+                rendered_remotely = self._run_remote_render(stage)
+            except StageCancelledError:
+                raise
+            except CostDeniedError as exc:
+                self.log(f"{exc} Falling back to the preview slideshow.")
+            except Exception as exc:  # noqa: BLE001
+                if self.strict_mode:
+                    raise
+                self.log(f"Remote walkthrough render failed, using preview slideshow: {exc}")
+
+        if rendered_remotely:
+            self.manifest.walkthrough_video = str(self.splat_walkthrough_path)
+            self._add_artifact(
+                stage, "Walkthrough Video", "video", self.splat_walkthrough_path,
+                "Splat-rendered camera-path walkthrough.",
+            )
+            stage.message = "Cosmos artifacts written; splat walkthrough rendered along the camera path."
+        else:
+            self._build_walkthrough_video()
+            self.manifest.walkthrough_video = str(self.walkthrough_path)
+            self._add_artifact(stage, "Walkthrough Video", "video", self.walkthrough_path, "Final MP4 walkthrough.")
+            stage.message = "Cosmos artifacts written and walkthrough video rendered."
         self._add_artifact(stage, "Cosmos Annotation", "json", annotation_path, "Reason model output.")
         self._add_artifact(stage, "Cosmos Transfer Notes", "text", transfer_path, "Transfer model notes.")
-        self._add_artifact(stage, "Walkthrough Video", "video", self.walkthrough_path, "Final MP4 walkthrough.")
+
+    def _run_remote_render(self, stage: StageRecord) -> bool:
+        """Render the authored camera path with the trained splat (HF Job).
+
+        Needs the recon stage's checkpoint bundle in the artifact dataset
+        (model.zip + processed_min.zip, produced by remote reconstructions
+        from M2 onward) and the camera_path.json authored by camera staging.
+        """
+        remote_out = self.root / "reconstruction" / "remote_out"
+        bundle_ok = (remote_out / "model.zip").exists() and (remote_out / "processed_min.zip").exists()
+        if not bundle_ok or not self.camera_render_path.exists():
+            self.log(
+                "No render bundle for this job (model.zip + processed_min.zip + camera_path.json) — "
+                "re-run reconstruction to bank one. Using the preview slideshow."
+            )
+            return False
+        runner_config = getattr(self.remote_runner, "config", None)
+        image_name = getattr(runner_config, "worker_image", "") if runner_config else ""
+        if not image_name or image_name.startswith("python:"):
+            raise RuntimeError("Remote worker image not configured.")
+
+        dataset_prefix = f"jobs/{self.manifest.job_id}/reconstruction/out"
+        ctx = StageContext(
+            job_dir=self.root,
+            job_id=self.manifest.job_id,
+            stage_key="walkthrough_render",
+            params={
+                "image": image_name,
+                "image_has_hub": True,
+                "flavor": "l4x1",
+                "est_minutes": 8,
+                "timeout_seconds": 2400,
+                "command": ["python", "/opt/vw/render_entrypoint.py"],
+                "extra_repo_inputs": [
+                    f"{dataset_prefix}/model.zip",
+                    f"{dataset_prefix}/processed_min.zip",
+                ],
+            },
+            inputs=[self.camera_render_path],
+            expected_outputs=[self.splat_walkthrough_path],
+            log=self.log,
+            cancel=self.cancel_token,
+        )
+        result = self.remote_runner.run(ctx)
+        if result.metadata:
+            record_spend(self.manifest, "cosmos_output", result.metadata)
+        return self.splat_walkthrough_path.exists()
 
     def _render_camera_previews(self, shots: list[dict]) -> list[Path]:
         try:
