@@ -490,6 +490,13 @@ _STRINGS: dict[str, dict[str, str]] = {
                               "QC": "QtWebEngine n'est pas disponible. Utilisez plutôt le visualiseur 3D en direct."},
     "viewport_captured":     {"EN": "Camera captured ({count} total) — saved to captured_cameras.json.",
                               "QC": "Caméra capturée ({count} au total) — enregistrée dans captured_cameras.json."},
+    "viewport_cameras":      {"EN": "Captured cameras",                          "QC": "Caméras capturées"},
+    "viewport_move_up":      {"EN": "Move Up",                                   "QC": "Monter"},
+    "viewport_move_down":    {"EN": "Move Down",                                 "QC": "Descendre"},
+    "viewport_delete":       {"EN": "Delete",                                    "QC": "Supprimer"},
+    "viewport_preview_path": {"EN": "Preview Path",                              "QC": "Aperçu du trajet"},
+    "viewport_need_two":     {"EN": "Capture at least 2 cameras to preview a path.",
+                              "QC": "Capturez au moins 2 caméras pour prévisualiser un trajet."},
     "remote_declined":       {"EN": "Remote reconstruction declined; using the local quick path.",
                               "QC": "Reconstruction à distance refusée; utilisation du chemin local rapide."},
 }

@@ -26,6 +26,43 @@ function initChannel() {
   });
 }
 
+// Fly the viewer camera along sampled path frames ({position, lookAt} pairs).
+// Any user input cancels playback.
+let pathPlayback = null;
+window.playPath = function playPath(framesJson, fps) {
+  if (!viewer) return;
+  const frames = typeof framesJson === 'string' ? JSON.parse(framesJson) : framesJson;
+  if (!frames.length) return;
+  if (pathPlayback) cancelAnimationFrame(pathPlayback.handle);
+  const frameMs = 1000 / (fps || 30);
+  const startedAt = performance.now();
+  const playback = { handle: 0, cancelled: false };
+  pathPlayback = playback;
+  const cancel = () => { playback.cancelled = true; setStatus('Path preview stopped.'); };
+  window.addEventListener('pointerdown', cancel, { once: true });
+  window.addEventListener('keydown', cancel, { once: true });
+  setStatus(`Previewing path (${(frames.length / (fps || 30)).toFixed(1)}s)…`);
+
+  function step(now) {
+    if (playback.cancelled) return;
+    const index = Math.min(frames.length - 1, Math.floor((now - startedAt) / frameMs));
+    const frame = frames[index];
+    viewer.camera.position.set(frame.position[0], frame.position[1], frame.position[2]);
+    if (viewer.controls) {
+      viewer.controls.target.set(frame.lookAt[0], frame.lookAt[1], frame.lookAt[2]);
+      viewer.controls.update();
+    } else {
+      viewer.camera.lookAt(frame.lookAt[0], frame.lookAt[1], frame.lookAt[2]);
+    }
+    if (index < frames.length - 1) {
+      playback.handle = requestAnimationFrame(step);
+    } else {
+      setStatus('Path preview finished.');
+    }
+  }
+  playback.handle = requestAnimationFrame(step);
+};
+
 // Called from Python (or the toolbar button) to capture the current view as
 // a camera pose. Position + lookAt in scene coordinates.
 window.captureCamera = function captureCamera() {

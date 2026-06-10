@@ -35,9 +35,26 @@ from PySide6.QtWidgets import (
     QFrame,
     QHBoxLayout,
     QLabel,
+    QListWidget,
     QPushButton,
     QVBoxLayout,
 )
+
+# Readable fallbacks when no translator is supplied (standalone viewer).
+_DEFAULT_STRINGS = {
+    "viewport_reload": "Reload Scene",
+    "viewport_capture": "Capture Camera",
+    "viewport_loading": "Loading reconstruction…",
+    "viewport_no_scene": "No reconstruction yet — run a job, then reload.",
+    "viewport_no_webengine": "QtWebEngine is unavailable on this system.",
+    "viewport_captured": "Camera captured ({count} total) — saved to captured_cameras.json.",
+    "viewport_cameras": "Captured cameras",
+    "viewport_move_up": "Move Up",
+    "viewport_move_down": "Move Down",
+    "viewport_delete": "Delete",
+    "viewport_preview_path": "Preview Path",
+    "viewport_need_two": "Capture at least 2 cameras to preview a path.",
+}
 
 try:
     from PySide6.QtWebChannel import QWebChannel
@@ -234,7 +251,10 @@ class ViewportTab(QFrame):
     ) -> None:
         super().__init__(parent=parent)
         self.setObjectName("Viewport")
-        self._t = translate or (lambda key: key)
+        base_translate = translate or (lambda key: key)
+        self._t = lambda key: (
+            value if (value := base_translate(key)) != key else _DEFAULT_STRINGS.get(key, key)
+        )
         self._job_dir: Path | None = None
 
         layout = QVBoxLayout(self)
@@ -259,8 +279,35 @@ class ViewportTab(QFrame):
             self.web_view = None
             return
 
+        body = QHBoxLayout()
+        body.setSpacing(6)
+        layout.addLayout(body, 1)
+
         self.web_view = QWebEngineView(self)
-        layout.addWidget(self.web_view, 1)
+        body.addWidget(self.web_view, 1)
+
+        # Captured-cameras panel: reorder/delete the walkthrough stops and
+        # preview the resulting path in the viewer before paying for a render.
+        panel = QVBoxLayout()
+        panel.setSpacing(4)
+        self.cameras_label = QLabel(self._t("viewport_cameras"), self)
+        panel.addWidget(self.cameras_label)
+        self.camera_list = QListWidget(self)
+        self.camera_list.setMaximumWidth(230)
+        panel.addWidget(self.camera_list, 1)
+        self.move_up_btn = QPushButton(self._t("viewport_move_up"), self)
+        self.move_down_btn = QPushButton(self._t("viewport_move_down"), self)
+        self.delete_btn = QPushButton(self._t("viewport_delete"), self)
+        self.preview_path_btn = QPushButton(self._t("viewport_preview_path"), self)
+        for button in (self.move_up_btn, self.move_down_btn, self.delete_btn, self.preview_path_btn):
+            button.setMaximumWidth(230)
+            panel.addWidget(button)
+        body.addLayout(panel)
+
+        self.move_up_btn.clicked.connect(lambda: self._move_camera(-1))
+        self.move_down_btn.clicked.connect(lambda: self._move_camera(1))
+        self.delete_btn.clicked.connect(self._delete_camera)
+        self.preview_path_btn.clicked.connect(self._preview_path)
 
         self._page = _ViewportPage(self.web_view.page().profile(), self.web_view, self._set_status)
         self.web_view.setPage(self._page)
@@ -287,7 +334,74 @@ class ViewportTab(QFrame):
         self._job_dir = Path(job_dir)
         if self.web_view is not None:
             self._server.job_root = self._job_dir
+            self._refresh_cameras()
         self.reload_scene()
+
+    # -- captured-cameras panel -------------------------------------------------
+
+    @property
+    def _captured_path(self) -> Path | None:
+        return self._job_dir / "usd" / "captured_cameras.json" if self._job_dir else None
+
+    def _load_captured(self) -> list[dict]:
+        path = self._captured_path
+        if path is None or not path.exists():
+            return []
+        try:
+            return json.loads(path.read_text(encoding="utf-8"))
+        except json.JSONDecodeError:
+            return []
+
+    def _save_captured(self, cameras: list[dict]) -> None:
+        path = self._captured_path
+        if path is None:
+            return
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps(cameras, indent=2), encoding="utf-8")
+        self._refresh_cameras()
+
+    def _refresh_cameras(self) -> None:
+        if self.web_view is None:
+            return
+        selected = self.camera_list.currentRow()
+        self.camera_list.clear()
+        for camera in self._load_captured():
+            self.camera_list.addItem(camera.get("name", "Camera"))
+        if 0 <= selected < self.camera_list.count():
+            self.camera_list.setCurrentRow(selected)
+
+    def _move_camera(self, delta: int) -> None:
+        cameras = self._load_captured()
+        row = self.camera_list.currentRow()
+        target = row + delta
+        if row < 0 or not (0 <= target < len(cameras)):
+            return
+        cameras[row], cameras[target] = cameras[target], cameras[row]
+        self._save_captured(cameras)
+        self.camera_list.setCurrentRow(target)
+
+    def _delete_camera(self) -> None:
+        cameras = self._load_captured()
+        row = self.camera_list.currentRow()
+        if not (0 <= row < len(cameras)):
+            return
+        del cameras[row]
+        self._save_captured(cameras)
+
+    def _preview_path(self) -> None:
+        from vaultwares_studio.camera_paths import build_visit_path, load_captured_entities, sample_path
+
+        path = self._captured_path
+        entities = load_captured_entities(path) if path else []
+        visit = build_visit_path(entities)
+        if visit is None:
+            self._set_status(self._t("viewport_need_two"))
+            return
+        frames = [
+            {"position": [float(v) for v in pos], "lookAt": [float(v) for v in target]}
+            for pos, target in sample_path(visit, fps=30)
+        ]
+        self.web_view.page().runJavaScript(f"window.playPath({json.dumps(frames)}, 30);")
 
     def reload_scene(self) -> None:
         if self.web_view is None or self._job_dir is None:
@@ -348,4 +462,5 @@ class ViewportTab(QFrame):
         pose["name"] = f"Captured {len(cameras) + 1}"
         cameras.append(pose)
         store.write_text(json.dumps(cameras, indent=2), encoding="utf-8")
+        self._refresh_cameras()
         self._set_status(self._t("viewport_captured").format(count=len(cameras)))
