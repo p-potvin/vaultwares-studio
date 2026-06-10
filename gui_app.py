@@ -1580,6 +1580,12 @@ class Window(FluentWindow):
         if ICON_PATH.exists():
             self.setWindowIcon(QIcon(str(ICON_PATH)))
 
+        # Mica/acrylic backdrops composite badly with QWebEngineView's native
+        # Chromium surface (the splat viewport renders blank inside the shell
+        # while the same widget works top-level). Solid window, working tab.
+        if hasattr(self, "setMicaEffectEnabled"):
+            self.setMicaEffectEnabled(False)
+
         self.dashboard = DashboardWidget(self)
         self.settings = SettingsTab(self)
         self.viewport = ViewportTab(self, translate=_t)

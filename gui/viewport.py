@@ -284,6 +284,11 @@ class ViewportTab(QFrame):
         layout.addLayout(body, 1)
 
         self.web_view = QWebEngineView(self)
+        # Native surface: avoids blank rendering when the parent window uses
+        # DWM backdrop effects (observed with the Fluent shell's Mica).
+        from PySide6.QtCore import Qt
+
+        self.web_view.setAttribute(Qt.WidgetAttribute.WA_NativeWindow, True)
         body.addWidget(self.web_view, 1)
 
         # Captured-cameras panel: reorder/delete the walkthrough stops and
