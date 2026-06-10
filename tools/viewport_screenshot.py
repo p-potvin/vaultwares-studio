@@ -1,7 +1,9 @@
 """Render a scene in the viewport and save a screenshot — debugging aid.
 
 Usage:
-    .venv\\Scripts\\python.exe tools\\viewport_screenshot.py <scene-rel-path> <out.png> [settle_seconds]
+    .venv\\Scripts\\python.exe tools\\viewport_screenshot.py <scene-rel-path> <out.png> [settle_seconds] [extra_query]
+
+extra_query example (explicit camera pose): "px=1&py=2&pz=3&lx=0&ly=0&lz=0"
 """
 
 from __future__ import annotations
@@ -42,6 +44,8 @@ def main() -> int:
     frame = tab._scene_framing()
     if frame:
         query.append(frame)
+    if len(sys.argv) > 4 and sys.argv[4]:
+        query.append(sys.argv[4])
     url.setQuery("&".join(query))
     print("loading:", url.toString(), flush=True)
     tab.web_view.load(url)

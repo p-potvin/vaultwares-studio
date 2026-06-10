@@ -93,10 +93,17 @@ async function main() {
   const center = ['cx', 'cy', 'cz'].map((k) => parseFloat(params.get(k)));
   const radius = parseFloat(params.get('r'));
   const framed = center.every(Number.isFinite) && Number.isFinite(radius);
-  const lookAt = framed ? center : [0, 0, 0];
-  const position = framed
+  let lookAt = framed ? center : [0, 0, 0];
+  let position = framed
     ? [center[0], center[1] + radius * 0.4, center[2] + radius * 1.2]
     : [0, 1.5, 4];
+  // Explicit pose (camera authoring / screenshot validation) overrides framing.
+  const explicitPos = ['px', 'py', 'pz'].map((k) => parseFloat(params.get(k)));
+  const explicitLook = ['lx', 'ly', 'lz'].map((k) => parseFloat(params.get(k)));
+  if (explicitPos.every(Number.isFinite) && explicitLook.every(Number.isFinite)) {
+    position = explicitPos;
+    lookAt = explicitLook;
+  }
 
   viewer = new GaussianSplats3D.Viewer({
     cameraUp: [0, 1, 0],
