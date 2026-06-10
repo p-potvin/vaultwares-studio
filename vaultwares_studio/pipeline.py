@@ -354,6 +354,17 @@ def stage_dependencies_complete(manifest: JobManifest, stage_key: str) -> bool:
     raise KeyError(stage_key)
 
 
+# Walkthrough footage wants ~300 frames for robust SfM (nerfstudio's own
+# video target); we extract at ~2x that and keep the sharpest per bucket.
+FRAME_KEEP_TARGET = 280
+FRAME_EXTRACT_TARGET = 560
+FRAME_PATTERNS = ("*.jpg", "*.png")
+
+
+def list_frames(frames_dir: Path) -> list[Path]:
+    return sorted(path for pattern in FRAME_PATTERNS for path in frames_dir.glob(pattern))
+
+
 def compute_extraction_fps(duration_seconds: float | None, target_frames: int = 100) -> int:
     """Sampling rate that yields ~target_frames regardless of clip length.
 
@@ -506,7 +517,7 @@ class DigitalTwinStudioRunner:
             save_job_manifest(self.manifest)
             raise RuntimeError("ffmpeg is required for frame extraction.")
         self.frames_dir.mkdir(parents=True, exist_ok=True)
-        for stale in self.frames_dir.glob("*.png"):
+        for stale in list_frames(self.frames_dir):
             stale.unlink(missing_ok=True)
         duration = None
         intake = self.stage_for("video_intake")
@@ -514,8 +525,11 @@ class DigitalTwinStudioRunner:
             duration = float(intake.metadata["probe"]["format"]["duration"])
         except (KeyError, TypeError, ValueError):
             pass
-        fps = compute_extraction_fps(duration)
-        self.log(f"Sampling at {fps} fps (duration: {duration or 'unknown'}s, targeting ~100 frames)")
+        fps = compute_extraction_fps(duration, target_frames=FRAME_EXTRACT_TARGET)
+        self.log(
+            f"Sampling at {fps} fps (duration: {duration or 'unknown'}s); "
+            f"keeping the sharpest ~{FRAME_KEEP_TARGET} frames"
+        )
         cmd = [
             ffmpeg,
             "-y",
@@ -525,10 +539,20 @@ class DigitalTwinStudioRunner:
             f"fps={fps}",
             "-q:v",
             "2",
-            str(self.frames_dir / "frame_%04d.png"),
+            str(self.frames_dir / "frame_%05d.jpg"),
         ]
         self._run_command(cmd, "Frame extraction failed.", timeout_seconds=1800)
-        frame_paths = sorted(self.frames_dir.glob("*.png"))
+        extracted_count = len(list_frames(self.frames_dir))
+        kept_count = extracted_count
+        if extracted_count > FRAME_KEEP_TARGET:
+            try:
+                from .frame_selection import prune_to_sharpest
+
+                extracted_count, kept_count = prune_to_sharpest(self.frames_dir, FRAME_KEEP_TARGET)
+                self.log(f"Kept {kept_count}/{extracted_count} sharpest frames (motion-blur filter).")
+            except ImportError:
+                self.log("OpenCV unavailable; skipping blur-aware frame selection.")
+        frame_paths = list_frames(self.frames_dir)
         if not frame_paths:
             raise RuntimeError("No frames were extracted.")
         preview_manifest = self.frames_dir / "frames_manifest.json"
@@ -542,7 +566,7 @@ class DigitalTwinStudioRunner:
             ),
             encoding="utf-8",
         )
-        stage.metadata = {"frameCount": len(frame_paths), "fps": fps}
+        stage.metadata = {"frameCount": len(frame_paths), "fps": fps, "extracted": extracted_count}
         stage.message = f"Extracted {len(frame_paths)} frames."
         self._add_artifact(stage, "Frames Manifest", "json", preview_manifest, "Frame extraction summary.")
         for index, frame in enumerate(frame_paths[:3], start=1):
@@ -550,7 +574,7 @@ class DigitalTwinStudioRunner:
 
     def _run_reconstruction(self, stage: StageRecord) -> None:
         self.recon_dir.mkdir(parents=True, exist_ok=True)
-        if not any(self.frames_dir.glob("*.png")):
+        if not list_frames(self.frames_dir):
             raise RuntimeError("Frame extraction must complete before reconstruction.")
         preset = get_preset(self.manifest.metadata.get("preset"))
         exported_ply: Path | None = None
@@ -631,7 +655,7 @@ class DigitalTwinStudioRunner:
             )
 
         frames_zip = self.recon_dir / "frames.zip"
-        frame_paths = sorted(self.frames_dir.glob("*.png"))
+        frame_paths = list_frames(self.frames_dir)
         with zipfile.ZipFile(frames_zip, "w", zipfile.ZIP_STORED) as archive:
             for frame in frame_paths:
                 archive.write(frame, frame.name)
