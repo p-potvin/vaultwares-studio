@@ -509,6 +509,23 @@ class TaskSignals(QObject):
     api_test_finished = Signal(bool, str)
 
 
+def _latest_started_manifest() -> JobManifest | None:
+    """Most recent job with at least one completed stage; else the latest one."""
+    from vaultwares_studio.pipeline import completed_stage_count, list_job_manifests
+
+    latest: JobManifest | None = None
+    for manifest_path in list_job_manifests():
+        try:
+            manifest = load_job_manifest(manifest_path)
+        except Exception:  # noqa: BLE001 - skip corrupt manifests
+            continue
+        if latest is None:
+            latest = manifest
+        if completed_stage_count(manifest) > 0:
+            return manifest
+    return latest
+
+
 def _open_path(path: Path) -> None:
     if os.name == "nt":
         os.startfile(str(path))  # type: ignore[attr-defined]
@@ -731,7 +748,11 @@ class DashboardWidget(QFrame):
         self.strict_mode = str(_settings.value("general/strict_mode", "false")).lower() == "true"
         self.is_running = False
         self.show_finish_panel = False
-        self.manifest = create_job_manifest(DEFAULT_SOURCE_VIDEO)
+        # Resume the most recent job WITH progress instead of creating an
+        # empty one on every launch — startup-created jobs polluted data/jobs
+        # and made "Open Latest Job" (and the Viewport) point at an
+        # artifact-less manifest.
+        self.manifest = _latest_started_manifest() or create_job_manifest(DEFAULT_SOURCE_VIDEO)
         self.selected_stage_key = self.manifest.current_stage_key
         self._normal_cards: list[QFrame] = []
         self._accent_cards: list[QFrame] = []
