@@ -27,6 +27,7 @@ Remote headless Isaac (48 GB box or a100); USD + physics colliders; Isaac Lab RL
 
 ## Watch items
 - cuTile / CUDA Tile (`cuda-tile`, CUDA 13.2): kernel-authoring DSL — relevant only if custom splat kernels ever land here.
+- **ARKit-pose ingestion** (user-requested 2026-06-10): accept captures that carry device poses (ARKit/ARCore visual-inertial tracking — e.g. Polycam/Record3D/Stray Scanner exports, or a small companion capture app). Poses seed or replace COLMAP SfM, give absolute scale (IMU), and survive feature-poor scenes (bare walls, dim rooms) where pure-pixels SfM fails — exactly the failure mode of the first test captures. Candidate slot: M1.5 ingestion option after the camera-staging milestone; nerfstudio already accepts `transforms.json` with known poses, so the integration seam is the worker's `ns-process-data` step.
 
 ---
 
