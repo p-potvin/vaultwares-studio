@@ -12,7 +12,7 @@ param(
 )
 
 $ErrorActionPreference = "Stop"
-$context = Join-Path $PSScriptRoot "..\docker\worker"
+$context = Join-Path "C:\Users\Administrator\Desktop\Github Repos\vaultwares-studio" "docker\worker"
 $image = "${Repo}:${Tag}"
 
 Write-Host "Building $image from $context"

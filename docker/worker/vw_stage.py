@@ -19,6 +19,15 @@ from huggingface_hub import HfApi, snapshot_download
 
 
 def main() -> int:
+    if "VW_STAGE_CONFIG" not in os.environ:
+        # Image-build mode: this container also runs as a (paused) HF Space
+        # whose only purpose is to have HF build the image server-side.
+        # Idle instead of crashing so the Space build registers as healthy.
+        import time
+
+        print("[vw-stage] no VW_STAGE_CONFIG — idling (image-build Space mode)", flush=True)
+        while True:
+            time.sleep(3600)
     cfg = json.loads(os.environ["VW_STAGE_CONFIG"])
     work = Path("/tmp/vw_stage")
     in_dir = work / "in"
