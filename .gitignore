@@ -222,3 +222,5 @@ __marimo__/
 
 # COLMAP
 tools/colmap/*
+# per-machine remote compute config (token lives in the OS keyring)
+data/remote_compute.json
