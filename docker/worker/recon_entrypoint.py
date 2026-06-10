@@ -97,6 +97,75 @@ def colmap_db_stats(processed_dir: Path) -> dict:
         return {"db_stats_error": str(exc)}
 
 
+def _count_model_images(model_dir: Path) -> int:
+    if not (model_dir / "images.txt").exists():
+        run([
+            "colmap", "model_converter",
+            "--input_path", str(model_dir),
+            "--output_path", str(model_dir),
+            "--output_type", "TXT",
+        ], capture_output=True)
+    images_txt = model_dir / "images.txt"
+    if not images_txt.exists():
+        return 0
+    lines = [l for l in images_txt.read_text(encoding="utf-8", errors="replace").splitlines() if l and not l.startswith("#")]
+    return len(lines) // 2
+
+
+def retry_mapper(processed: Path) -> int:
+    """Re-run ONLY the incremental mapper with relaxed initialization.
+
+    COLMAP's mapper is non-deterministic: the same (healthy) match database
+    produced 280/280 in one run and 2/280 in another — a degenerate RANSAC
+    init pair kills the whole model. Re-mapping is ~2 min vs ~25 for a full
+    matching pass, so try it (twice, progressively relaxed) before
+    escalating to exhaustive matching.
+    """
+    database = processed / "colmap" / "database.db"
+    image_dir = processed / "images"
+    if not (database.exists() and image_dir.exists()):
+        return 0
+    best_count, best_model = 0, None
+    attempts = (
+        ["--Mapper.init_min_tri_angle", "8", "--Mapper.init_min_num_inliers", "50"],
+        ["--Mapper.init_min_tri_angle", "4", "--Mapper.init_min_num_inliers", "30",
+         "--Mapper.abs_pose_min_num_inliers", "15"],
+    )
+    for attempt, options in enumerate(attempts, start=1):
+        out_dir = processed / "colmap" / f"sparse_retry{attempt}"
+        out_dir.mkdir(parents=True, exist_ok=True)
+        result = run([
+            "colmap", "mapper",
+            "--database_path", str(database),
+            "--image_path", str(image_dir),
+            "--output_path", str(out_dir),
+            "--Mapper.multiple_models", "0",
+            *options,
+        ])
+        if result.returncode != 0:
+            continue
+        for model_dir in (d for d in out_dir.iterdir() if d.is_dir()):
+            count = _count_model_images(model_dir)
+            print(f"[recon] mapper retry {attempt}: model {model_dir.name} registered {count}", flush=True)
+            if count > best_count:
+                best_count, best_model = count, model_dir
+        if best_count >= MIN_REGISTERED_IMAGES:
+            break
+    if best_model is None or best_count < MIN_REGISTERED_IMAGES:
+        return 0
+    regen = run([
+        "ns-process-data", "images",
+        "--data", str(image_dir),
+        "--output-dir", str(processed),
+        "--skip-colmap",
+        "--skip-image-processing",
+        "--colmap-model-path", str(best_model.relative_to(processed)),
+    ])
+    if regen.returncode != 0:
+        return 0
+    return count_registered_images(processed)
+
+
 def count_registered_images(processed_dir: Path) -> int:
     transforms = processed_dir / "transforms.json"
     if not transforms.exists():
@@ -144,9 +213,9 @@ def main() -> int:  # noqa: PLR0911, PLR0915
 
     registered = 0
     matching_used = ""
-    # Sequential first (fast, right for video). If too few register, escalate
-    # to exhaustive matching once — more pair candidates rescue footage with
-    # skips, blur, or exposure swings; costs nothing when sequential works.
+    # Sequential first (fast, right for video). On low registration, retry
+    # JUST the mapper with relaxed init (non-determinism, see retry_mapper)
+    # before paying for a full exhaustive matching pass.
     for matching in ("sequential", "exhaustive"):
         if processed.exists():
             shutil.rmtree(processed)
@@ -172,6 +241,14 @@ def main() -> int:  # noqa: PLR0911, PLR0915
         print(f"[recon] registered images ({matching}): {registered}/{frame_count}", flush=True)
         print(f"[recon] colmap db stats: {json.dumps(stats)}", flush=True)
         if registered >= MIN_REGISTERED_IMAGES:
+            break
+        started = time.monotonic()
+        retried = retry_mapper(processed)
+        timings[f"mapper_retry_{matching}_s"] = round(time.monotonic() - started, 1)
+        if retried >= MIN_REGISTERED_IMAGES:
+            registered = retried
+            matching_used = f"{matching}+mapper-retry"
+            print(f"[recon] registered images ({matching_used}): {registered}/{frame_count}", flush=True)
             break
 
     if registered < MIN_REGISTERED_IMAGES:
