@@ -10,9 +10,19 @@ from vaultwares_studio.pipeline import (
     DEFAULT_SOURCE_VIDEO,
     MANIFEST_SCHEMA_VERSION,
     JobManifest,
+    compute_extraction_fps,
     create_job_manifest,
     record_spend,
 )
+
+
+def test_compute_extraction_fps_targets_100_frames():
+    assert compute_extraction_fps(12) == 8     # short clip: dense sampling
+    assert compute_extraction_fps(50) == 2     # ~100 frames at 2 fps
+    assert compute_extraction_fps(600) == 2    # long video: floor at 2 fps
+    assert compute_extraction_fps(5) == 10     # very short: ceiling at 10 fps
+    assert compute_extraction_fps(None) == 2   # unknown duration: legacy default
+    assert compute_extraction_fps(0) == 2
 from vaultwares_studio.runners import (
     CancelToken,
     CostDeniedError,

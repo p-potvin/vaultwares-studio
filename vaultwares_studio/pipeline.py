@@ -354,6 +354,17 @@ def stage_dependencies_complete(manifest: JobManifest, stage_key: str) -> bool:
     raise KeyError(stage_key)
 
 
+def compute_extraction_fps(duration_seconds: float | None, target_frames: int = 100) -> int:
+    """Sampling rate that yields ~target_frames regardless of clip length.
+
+    Short clips need denser sampling or COLMAP sequential matching starves
+    (a 12 s clip at the old fixed 2 fps gave only 24 frames and registered 3).
+    """
+    if not duration_seconds or duration_seconds <= 0:
+        return 2
+    return max(2, min(10, round(target_frames / duration_seconds)))
+
+
 def record_spend(manifest: JobManifest, stage_key: str, cost_metadata: dict) -> None:
     """Append a paid-run record to the manifest's spend ledger and persist it."""
     entry = {"stage": stage_key, "recorded_at": _now(), **cost_metadata}
@@ -497,13 +508,21 @@ class DigitalTwinStudioRunner:
         self.frames_dir.mkdir(parents=True, exist_ok=True)
         for stale in self.frames_dir.glob("*.png"):
             stale.unlink(missing_ok=True)
+        duration = None
+        intake = self.stage_for("video_intake")
+        try:
+            duration = float(intake.metadata["probe"]["format"]["duration"])
+        except (KeyError, TypeError, ValueError):
+            pass
+        fps = compute_extraction_fps(duration)
+        self.log(f"Sampling at {fps} fps (duration: {duration or 'unknown'}s, targeting ~100 frames)")
         cmd = [
             ffmpeg,
             "-y",
             "-i",
             self.manifest.source_video,
             "-vf",
-            "fps=2",
+            f"fps={fps}",
             "-q:v",
             "2",
             str(self.frames_dir / "frame_%04d.png"),
@@ -523,7 +542,7 @@ class DigitalTwinStudioRunner:
             ),
             encoding="utf-8",
         )
-        stage.metadata = {"frameCount": len(frame_paths)}
+        stage.metadata = {"frameCount": len(frame_paths), "fps": fps}
         stage.message = f"Extracted {len(frame_paths)} frames."
         self._add_artifact(stage, "Frames Manifest", "json", preview_manifest, "Frame extraction summary.")
         for index, frame in enumerate(frame_paths[:3], start=1):

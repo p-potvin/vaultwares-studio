@@ -298,8 +298,19 @@ class HfJobsStageRunner(StageRunner):
             "rate_source": estimate.source,
         }
         if last_stage in TERMINAL_FAILURE:
+            # Stage entrypoints upload a structured error.json on failure —
+            # surface its detail instead of just the job URL.
+            detail = ""
+            try:
+                self._download_outputs(api, repo, prefix, ctx)
+                error_file = ctx.job_dir / ctx.stage_key / "remote_out" / "error.json"
+                if error_file.exists():
+                    payload = json.loads(error_file.read_text(encoding="utf-8"))
+                    detail = f" [{payload.get('code')}] {payload.get('detail')}"
+            except Exception:  # noqa: BLE001 - diagnostics are best-effort
+                pass
             raise RuntimeError(
-                f"Remote job ended in {last_stage} (see {job.url}). Cost metadata: {cost_metadata}"
+                f"Remote job ended in {last_stage}.{detail} (see {job.url}). Cost: {cost_metadata}"
             )
 
         downloaded = self._download_outputs(api, repo, prefix, ctx)
