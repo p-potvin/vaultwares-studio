@@ -543,7 +543,7 @@ class DigitalTwinStudioRunner:
                 raise
             except CostDeniedError as exc:
                 self.log(f"{exc} Using the local quick path instead.")
-            except RuntimeError as exc:
+            except Exception as exc:  # noqa: BLE001 - incl. hub HTTP errors, which are not RuntimeErrors
                 if self.strict_mode:
                     raise
                 self.log(f"Remote reconstruction failed, falling back to local path: {exc}")

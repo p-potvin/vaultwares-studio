@@ -20,14 +20,26 @@ from huggingface_hub import HfApi, snapshot_download
 
 def main() -> int:
     if "VW_STAGE_CONFIG" not in os.environ:
-        # Image-build mode: this container also runs as a (paused) HF Space
-        # whose only purpose is to have HF build the image server-side.
-        # Idle instead of crashing so the Space build registers as healthy.
-        import time
+        # Image-build mode: this container also runs as an HF Space whose only
+        # purpose is to have HF build (and host) the image server-side. Docker
+        # Spaces health-check an HTTP port, so serve a stub on 7860 — without
+        # it the Space hangs in APP_STARTING and Jobs refuses the image ref.
+        from http.server import BaseHTTPRequestHandler, HTTPServer
 
-        print("[vw-stage] no VW_STAGE_CONFIG — idling (image-build Space mode)", flush=True)
-        while True:
-            time.sleep(3600)
+        class _Stub(BaseHTTPRequestHandler):
+            def do_GET(self):  # noqa: N802
+                body = b"vw-studio-worker image host; real work runs in HF Jobs."
+                self.send_response(200)
+                self.send_header("Content-Type", "text/plain")
+                self.send_header("Content-Length", str(len(body)))
+                self.end_headers()
+                self.wfile.write(body)
+
+            def log_message(self, *_args):
+                pass
+
+        print("[vw-stage] no VW_STAGE_CONFIG — serving image-host stub on :7860", flush=True)
+        HTTPServer(("0.0.0.0", 7860), _Stub).serve_forever()
     cfg = json.loads(os.environ["VW_STAGE_CONFIG"])
     work = Path("/tmp/vw_stage")
     in_dir = work / "in"
