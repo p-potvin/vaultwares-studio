@@ -274,6 +274,20 @@ async function main() {
     });
     viewer.start();
     setupAxisGizmo(() => viewer.camera, () => viewer.controls);
+    // Infinite zoom: orbit controls asymptote at the target and feel like a
+    // wall. When zooming in close, push the target forward so scrolling
+    // carries the camera THROUGH the scene instead of stalling at the pivot.
+    window.addEventListener('wheel', (event) => {
+      if (event.deltaY >= 0 || !viewer.controls) return;
+      const camera = viewer.camera;
+      const target = viewer.controls.target;
+      const distance = camera.position.distanceTo(target);
+      if (distance < 0.4) {
+        const forward = new THREE.Vector3().subVectors(target, camera.position).normalize();
+        target.addScaledVector(forward, Math.max(distance, 0.06) * 0.35);
+        viewer.controls.update();
+      }
+    }, { passive: true });
     setStatus('Scene loaded — drag to orbit, scroll to zoom, WASD to fly.');
   } catch (error) {
     setStatus(`Failed to load scene: ${error.message || error}`);
