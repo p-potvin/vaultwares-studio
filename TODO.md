@@ -45,6 +45,10 @@ Plan of record: `docs/plans/plan-v1-remote-first-20260609.md` (M0–M6). Legacy 
 
 ## M3+: see plan file (Robot Lab, Cosmos, packaging)
 
+## Cost optimization (after first green run)
+- [ ] Test GPU *matching* with CPU *extraction* (`--no-gpu` currently disables both; the container bug may be extraction-only). If matching works on GPU, COLMAP drops from ~20 min to ~2 min on the L4 → run cost ~USD 0.15, no orchestration changes.
+- [ ] Else: split reconstruction into two jobs — SfM on `cpu-upgrade` (~USD 0.04) + training on `l4x1` (~USD 0.13), processed dataset handed off through the artifact dataset (user-proposed; boot latency acceptable for batch work). ZeroGPU evaluated and rejected (2-min GPU slices can't hold a training run); free Space CPU tier rejected (2 vCPU, no job semantics, ToS-gray).
+
 ## Infra notes
 - Worker image is built server-side on HF (local Docker/WSL unavailable): `tools/push_worker_space.py` + `tools/monitor_worker_space.py`; image ref `hf.co/spaces/clopeux/vw-studio-worker` (set in data/remote_compute.json)
 - HF Jobs requires pre-paid credits: echo test + remote reconstruction blocked until the account balance is topped up (402 Payment Required on run_job)
