@@ -151,3 +151,10 @@ PySide6-Fluent-Widgets>=1.11.0
 pycolmap>=4.0.0
 psutil>=5.9.0              # process-tree cancel for streamed stage commands
 keyring>=25.0.0            # HF token storage in the OS credential manager
+
+
+# -----------------------------------------------------------------------------
+# GROUP 14 — Robot Lab (M3): local grid-nav RL backend (CPU)
+# -----------------------------------------------------------------------------
+gymnasium>=0.29
+stable-baselines3>=2.3
