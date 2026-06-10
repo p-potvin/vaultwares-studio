@@ -131,7 +131,7 @@ from gui.viewport import ViewportTab, register_viewer_scheme
 ROOT = Path(__file__).resolve().parent
 ICON_PATH = ROOT / "Brand" / "favicons" / "vaultwares-favicon-gold-filled-256.png"
 
-sys.path.insert(0, str(ROOT / "vault-themes"))
+sys.path.insert(0, str(ROOT / "vaultwares-themes"))
 try:
     from theme_manager import VaultTheme, VaultThemeManager  # noqa: E402
 except ImportError as _exc:
