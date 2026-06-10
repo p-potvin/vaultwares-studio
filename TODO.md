@@ -14,8 +14,8 @@ Plan of record: `docs/plans/plan-v1-remote-first-20260609.md` (M0–M6). Legacy 
 - [x] Worker image v1: `docker/worker/Dockerfile` (COLMAP + nerfstudio + hub) + `vw_stage.py` + `tools/build_worker_image.ps1`
 - [x] GUI Settings: HF token (OS keyring), artifact repo, default flavor, cost-confirm dialog, echo-test button
 - [x] Tests: runner streaming/cancel/timeout, cost-denial, config round-trip, manifest v2 migration, spend ledger (19 passing)
-- [ ] Live verification: echo job round-trip on `cpu-basic` (needs HF token; run from Settings → "Run Echo Test Job")
-- [ ] Build & push `vw-studio-worker:0.1` to Docker Hub (needed before M1 remote reconstruction)
+- [x] Live verification: echo job round-trip on `cpu-basic` (needs HF token; run from Settings → "Run Echo Test Job")
+- [x] Build & push `vw-studio-worker:0.1` to Docker Hub (needed before M1 remote reconstruction)
 
 ## M1: Real Reconstruction, Remote
 
@@ -30,7 +30,24 @@ Plan of record: `docs/plans/plan-v1-remote-first-20260609.md` (M0–M6). Legacy 
 - [ ] Live verification: real remote reconstruction on a room video (needs HF token + worker image pushed)
 - [ ] OOM auto-retry at next-lower preset (deferred — needs mid-run confirm UX; failures currently suggest a lower preset)
 
-## M2+: see plan file (viewport/staging, Robot Lab, Cosmos, packaging)
+## M2: Interactive Viewport + Camera Staging (in progress)
+
+- [x] Day-1 spike: QtWebEngineWidgets verified in the venv (PySide6 6.7.2)
+- [x] Vendored viewer: three.js 0.160.0 + GaussianSplats3D 0.4.7 under `vaultwares_studio/webviewer/vendor/`
+- [x] `vw://` URL scheme handler (app assets + job artifacts, no web server, path-traversal guarded)
+- [x] Viewport tab v1 (`gui/viewport.py`): loads the job's `cloud.ply` (progressive), orbit/WASD fly, QWebChannel bridge, "Capture Camera" saves poses to `usd/captured_cameras.json`
+- [ ] CameraEntity integration: captured poses → camera_director entities → manifest + USD
+- [ ] Keyframe timeline + Catmull-Rom/slerp camera paths (`camera_paths.py`)
+- [ ] Offline walkthrough via remote `ns-render camera-path` (reuses model.zip from M1)
+- [ ] `usd_cameras` → `camera_staging` stage rename with NEEDS_USER_INPUT flow
+- [ ] gui_app.py split into `gui/` package (theme, strings, widgets, main_window)
+- [ ] .ksplat conversion for faster viewport loads
+
+## M3+: see plan file (Robot Lab, Cosmos, packaging)
+
+## Infra notes
+- Worker image is built server-side on HF (local Docker/WSL unavailable): `tools/push_worker_space.py` + `tools/monitor_worker_space.py`; image ref `hf.co/spaces/clopeux/vw-studio-worker` (set in data/remote_compute.json)
+- HF Jobs requires pre-paid credits: echo test + remote reconstruction blocked until the account balance is topped up (402 Payment Required on run_job)
 
 ---
 

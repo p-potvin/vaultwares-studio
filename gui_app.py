@@ -126,6 +126,7 @@ from vaultwares_studio.runners import (
     set_hf_token,
 )
 from vaultwares_studio.viewer import open_live_viewer
+from gui.viewport import ViewportTab, register_viewer_scheme
 
 ROOT = Path(__file__).resolve().parent
 ICON_PATH = ROOT / "Brand" / "favicons" / "vaultwares-favicon-gold-filled-256.png"
@@ -479,6 +480,16 @@ _STRINGS: dict[str, dict[str, str]] = {
     "remote_no_token":       {"EN": "No HF token configured. Paste your token and save first.",
                               "QC": "Aucun jeton HF configuré. Collez votre jeton et enregistrez d'abord."},
     "preset_label":          {"EN": "Quality preset",                            "QC": "Préréglage de qualité"},
+    "tab_viewport":          {"EN": "Viewport",                                  "QC": "Vue 3D"},
+    "viewport_reload":       {"EN": "Reload Scene",                              "QC": "Recharger la scène"},
+    "viewport_capture":      {"EN": "Capture Camera",                            "QC": "Capturer la caméra"},
+    "viewport_loading":      {"EN": "Loading reconstruction…",                   "QC": "Chargement de la reconstruction…"},
+    "viewport_no_scene":     {"EN": "No reconstruction yet — run a job, then reload.",
+                              "QC": "Aucune reconstruction — exécutez un travail, puis rechargez."},
+    "viewport_no_webengine": {"EN": "QtWebEngine is unavailable on this system. Use the Open Live 3D Viewer button instead.",
+                              "QC": "QtWebEngine n'est pas disponible. Utilisez plutôt le visualiseur 3D en direct."},
+    "viewport_captured":     {"EN": "Camera captured ({count} total) — saved to captured_cameras.json.",
+                              "QC": "Caméra capturée ({count} au total) — enregistrée dans captured_cameras.json."},
     "remote_declined":       {"EN": "Remote reconstruction declined; using the local quick path.",
                               "QC": "Reconstruction à distance refusée; utilisation du chemin local rapide."},
 }
@@ -1543,14 +1554,21 @@ class Window(FluentWindow):
 
         self.dashboard = DashboardWidget(self)
         self.settings = SettingsTab(self)
+        self.viewport = ViewportTab(self, translate=_t)
         self.settings.toggle_btn.clicked.connect(self._toggle_strict_mode)
         self.settings.theme_changed.connect(self._apply_theme)
 
         self.dashboard.theme_changed.connect(self._apply_theme)
         self.dashboard.lang_changed.connect(self._apply_lang)
+        self.viewport.log.connect(self.dashboard.signals.log.emit)
+        self.dashboard.signals.manifest_changed.connect(
+            lambda manifest: self.viewport.set_job(Path(manifest.output_dir))
+        )
         self.addSubInterface(self.dashboard, FIF.HOME, "Studio")
+        self.addSubInterface(self.viewport, FIF.VIDEO, _t("tab_viewport"))
         self.addSubInterface(self.settings, FIF.SETTING, "Settings", NavigationItemPosition.BOTTOM)
         self.resize(1440, 900)
+        self.viewport.set_job(Path(self.dashboard.manifest.output_dir))
 
     def _toggle_strict_mode(self) -> None:
         strict_mode = not self.dashboard.strict_mode
@@ -1588,6 +1606,7 @@ if __name__ == "__main__":
     if sys.stderr.encoding != "utf-8":
         sys.stderr.reconfigure(encoding="utf-8")  # type: ignore[attr-defined]
 
+    register_viewer_scheme()  # must precede QApplication construction
     app = QApplication(sys.argv)
     font = QFont("Segoe UI Semilight", 10)
     app.setFont(font)
