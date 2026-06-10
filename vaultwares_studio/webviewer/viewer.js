@@ -2,6 +2,7 @@
 // The Python side talks to this file via QWebChannel ("bridge" object) and
 // window.* functions invoked through runJavaScript().
 
+import * as THREE from 'three';
 import * as GaussianSplats3D from './vendor/gaussian-splats-3d.module.js';
 
 const statusEl = document.getElementById('status');
@@ -24,6 +25,152 @@ function initChannel() {
       resolve();
     });
   });
+}
+
+// Blender-style axis gizmo: corner widget mirroring the camera orientation.
+// Click an axis ball to snap the view; drag the widget to orbit the camera.
+function setupAxisGizmo(getCamera, getControls) {
+  const size = 130;
+  const canvas = document.createElement('canvas');
+  Object.assign(canvas.style, {
+    position: 'absolute', top: '10px', right: '10px',
+    width: `${size}px`, height: `${size}px`, zIndex: 20, cursor: 'grab',
+    borderRadius: '50%', background: 'rgba(20,20,26,0.35)',
+  });
+  document.body.appendChild(canvas);
+
+  const renderer = new THREE.WebGLRenderer({ canvas, alpha: true, antialias: true });
+  renderer.setSize(size, size, false);
+  renderer.setPixelRatio(window.devicePixelRatio || 1);
+  const scene = new THREE.Scene();
+  const gizmoCam = new THREE.OrthographicCamera(-1.9, 1.9, 1.9, -1.9, 0.1, 10);
+  gizmoCam.position.set(0, 0, 5);
+
+  const makeLabel = (text, color) => {
+    const labelCanvas = document.createElement('canvas');
+    labelCanvas.width = labelCanvas.height = 64;
+    const ctx = labelCanvas.getContext('2d');
+    ctx.font = 'bold 40px sans-serif';
+    ctx.textAlign = 'center';
+    ctx.textBaseline = 'middle';
+    ctx.fillStyle = color;
+    ctx.fillText(text, 32, 34);
+    const sprite = new THREE.Sprite(new THREE.SpriteMaterial({
+      map: new THREE.CanvasTexture(labelCanvas), depthTest: false, transparent: true,
+    }));
+    sprite.scale.setScalar(0.62);
+    return sprite;
+  };
+
+  const pickables = [];
+  const axisDefs = [
+    { dir: new THREE.Vector3(1, 0, 0), color: 0xe5544b, css: '#ffd9d6', label: 'X' },
+    { dir: new THREE.Vector3(0, 1, 0), color: 0x7ab32a, css: '#e4f7c7', label: 'Y' },
+    { dir: new THREE.Vector3(0, 0, 1), color: 0x4286e0, css: '#d8e9ff', label: 'Z' },
+  ];
+  for (const axis of axisDefs) {
+    const lineGeometry = new THREE.BufferGeometry().setFromPoints(
+      [new THREE.Vector3(0, 0, 0), axis.dir.clone().multiplyScalar(1.05)]
+    );
+    scene.add(new THREE.Line(lineGeometry, new THREE.LineBasicMaterial({ color: axis.color })));
+
+    const tip = new THREE.Mesh(
+      new THREE.SphereGeometry(0.30, 16, 16),
+      new THREE.MeshBasicMaterial({ color: axis.color })
+    );
+    tip.position.copy(axis.dir).multiplyScalar(1.35);
+    tip.userData.dir = axis.dir.clone();
+    const label = makeLabel(axis.label, axis.css);
+    label.position.copy(tip.position);
+    scene.add(tip, label);
+    pickables.push(tip);
+
+    const negativeTip = new THREE.Mesh(
+      new THREE.SphereGeometry(0.20, 16, 16),
+      new THREE.MeshBasicMaterial({ color: axis.color, transparent: true, opacity: 0.45 })
+    );
+    negativeTip.position.copy(axis.dir).multiplyScalar(-1.35);
+    negativeTip.userData.dir = axis.dir.clone().negate();
+    scene.add(negativeTip);
+    pickables.push(negativeTip);
+  }
+
+  const controlsTarget = () => {
+    const controls = getControls();
+    return controls ? controls.target.clone() : new THREE.Vector3();
+  };
+
+  const snapTo = (dir) => {
+    const camera = getCamera();
+    const target = controlsTarget();
+    const distance = Math.max(camera.position.distanceTo(target), 0.5);
+    const direction = dir.clone().normalize();
+    if (Math.abs(direction.y) > 0.999) {
+      direction.add(new THREE.Vector3(0, 0, 0.02)).normalize(); // dodge gimbal at the poles
+    }
+    camera.position.copy(target).addScaledVector(direction, distance);
+    camera.up.set(0, 1, 0);
+    camera.lookAt(target);
+    const controls = getControls();
+    if (controls) controls.update();
+  };
+
+  const orbit = (dx, dy) => {
+    const camera = getCamera();
+    const target = controlsTarget();
+    const offset = camera.position.clone().sub(target);
+    const spherical = new THREE.Spherical().setFromVector3(offset);
+    spherical.theta -= dx * 0.012;
+    spherical.phi = Math.min(Math.PI - 0.05, Math.max(0.05, spherical.phi - dy * 0.012));
+    offset.setFromSpherical(spherical);
+    camera.position.copy(target).add(offset);
+    camera.lookAt(target);
+    const controls = getControls();
+    if (controls) controls.update();
+  };
+
+  let dragging = false;
+  let movedDistance = 0;
+  let last = [0, 0];
+  canvas.addEventListener('pointerdown', (event) => {
+    dragging = true;
+    movedDistance = 0;
+    last = [event.clientX, event.clientY];
+    canvas.setPointerCapture(event.pointerId);
+    canvas.style.cursor = 'grabbing';
+    event.stopPropagation();
+  });
+  canvas.addEventListener('pointermove', (event) => {
+    if (!dragging) return;
+    const dx = event.clientX - last[0];
+    const dy = event.clientY - last[1];
+    movedDistance += Math.abs(dx) + Math.abs(dy);
+    last = [event.clientX, event.clientY];
+    if (movedDistance > 4) orbit(dx, dy);
+    event.stopPropagation();
+  });
+  canvas.addEventListener('pointerup', (event) => {
+    dragging = false;
+    canvas.style.cursor = 'grab';
+    if (movedDistance <= 4) {
+      const rect = canvas.getBoundingClientRect();
+      const pointer = new THREE.Vector2(
+        ((event.clientX - rect.left) / rect.width) * 2 - 1,
+        -(((event.clientY - rect.top) / rect.height) * 2 - 1)
+      );
+      const raycaster = new THREE.Raycaster();
+      raycaster.setFromCamera(pointer, gizmoCam);
+      const hits = raycaster.intersectObjects(pickables, false);
+      if (hits.length) snapTo(hits[0].object.userData.dir);
+    }
+    event.stopPropagation();
+  });
+
+  (function tick() {
+    scene.quaternion.copy(getCamera().quaternion).invert();
+    renderer.render(scene, gizmoCam);
+    requestAnimationFrame(tick);
+  })();
 }
 
 // Fly the viewer camera along sampled path frames ({position, lookAt} pairs).
@@ -126,6 +273,7 @@ async function main() {
       },
     });
     viewer.start();
+    setupAxisGizmo(() => viewer.camera, () => viewer.controls);
     setStatus('Scene loaded — drag to orbit, scroll to zoom, WASD to fly.');
   } catch (error) {
     setStatus(`Failed to load scene: ${error.message || error}`);
