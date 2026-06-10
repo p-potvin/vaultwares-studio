@@ -102,26 +102,40 @@ def main() -> int:  # noqa: PLR0911, PLR0915
     frame_count = len(list(images.rglob("*.png"))) + len(list(images.rglob("*.jpg")))
     print(f"[recon] {frame_count} frames extracted", flush=True)
 
-    started = time.monotonic()
-    process = run([
-        "ns-process-data", "images",
-        "--data", str(images),
-        "--output-dir", str(processed),
-        "--matching-method", "sequential",
-        "--num-downscales", "3",
-    ])
-    timings["process_data_s"] = round(time.monotonic() - started, 1)
-    if process.returncode != 0:
-        return fail(out_dir, "process_data_failed", f"ns-process-data exit {process.returncode}")
+    registered = 0
+    matching_used = ""
+    # Sequential first (fast, right for video). If too few register, escalate
+    # to exhaustive matching once — more pair candidates rescue footage with
+    # skips, blur, or exposure swings; costs nothing when sequential works.
+    for matching in ("sequential", "exhaustive"):
+        if processed.exists():
+            shutil.rmtree(processed)
+        processed.mkdir(parents=True, exist_ok=True)
+        started = time.monotonic()
+        process = run([
+            "ns-process-data", "images",
+            "--data", str(images),
+            "--output-dir", str(processed),
+            "--matching-method", matching,
+            "--num-downscales", "3",
+        ])
+        timings[f"process_data_{matching}_s"] = round(time.monotonic() - started, 1)
+        if process.returncode != 0:
+            return fail(out_dir, "process_data_failed", f"ns-process-data exit {process.returncode}")
+        registered = count_registered_images(processed)
+        matching_used = matching
+        print(f"[recon] registered images ({matching}): {registered}/{frame_count}", flush=True)
+        if registered >= MIN_REGISTERED_IMAGES:
+            break
 
-    registered = count_registered_images(processed)
-    print(f"[recon] registered images: {registered}/{frame_count}", flush=True)
     if registered < MIN_REGISTERED_IMAGES:
         return fail(
             out_dir,
             "too_few_registered_images",
-            f"COLMAP registered only {registered} images (need >= {MIN_REGISTERED_IMAGES}). "
-            "Capture tips: slower camera movement, more overlap, better lighting, avoid blur.",
+            f"COLMAP registered only {registered} images even with exhaustive matching "
+            f"(need >= {MIN_REGISTERED_IMAGES}). Capture tips: WALK through the space "
+            "(rotation-only pans give no parallax), move slowly, keep good lighting, "
+            "avoid blur and large featureless/dark surfaces.",
         )
 
     train_args = filter_supported_flags(json.loads(args.train_args))
@@ -168,6 +182,7 @@ def main() -> int:  # noqa: PLR0911, PLR0915
             {
                 "frames": frame_count,
                 "registered_images": registered,
+                "matching_method": matching_used,
                 "train_args": train_args,
                 "timings": timings,
             },

@@ -45,9 +45,10 @@ def main() -> int:
             print(f"BUILD FAILED: {stage} — check https://huggingface.co/spaces/{repo_id}?logs=build")
             return 1
         if stage in TERMINAL_OK:
-            print("Image built. Pausing the Space (it only exists to hold the image).")
-            api.pause_space(repo_id)
-            print(f"Done. Job image: hf.co/spaces/{repo_id}")
+            # Leave the Space RUNNING: the Jobs backend resolves the image from
+            # a public running Space (paused/private both produced 500s), and
+            # the stub server sits on the free CPU tier at no cost.
+            print(f"Image built and Space running. Job image: hf.co/spaces/{repo_id}")
             return 0
         time.sleep(args.poll_seconds)
 
