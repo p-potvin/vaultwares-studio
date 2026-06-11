@@ -19,7 +19,7 @@
 # Use this for USD authoring without the full Omniverse runtime.
 # For Omniverse/Isaac Sim integration, the USD API is bundled with omniverse-kit.
 # -----------------------------------------------------------------------------
-usd-core==24.11
+usd-core==26.5
 
 
 # -----------------------------------------------------------------------------
