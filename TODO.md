@@ -19,6 +19,8 @@ Plan of record: `docs/plans/plan-v1-remote-first-20260609.md` (M0–M6). Legacy 
 
 ## M1: Real Reconstruction, Remote
 
+**Quality Policy (2026-06-10):** Reject bad footage rather than engineer workarounds. Frame selection improved with variance-of-Laplacian blur awareness (~280 sharp frames from ~600 extracted). Capture guidelines: slow walk, good light, single lens, 30-60s landscape.
+
 - [x] Worker recon entrypoint (`docker/worker/recon_entrypoint.py`): ns-process-data (sequential) → ns-train splatfacto (flag probe drops unsupported args) → ns-export gaussian-splat; structured error.json (e.g. too_few_registered_images) + summary.json + model.zip checkpoint for M2 renders
 - [x] Quality presets (`presets.py`): Draft/Standard/High + local-debug; flavor + cost per preset; VRAM-saver train args
 - [x] Full-attribute splat PLY (`splat_io.py`): read/write 3DGS PLY, decimated `cloud_preview.ply`, no more Open3D flattening
@@ -28,6 +30,7 @@ Plan of record: `docs/plans/plan-v1-remote-first-20260609.md` (M0–M6). Legacy 
 - [x] GUI: quality-preset dropdown on the Studio tab; pre-run cost-confirm dialog for remote reconstruction; viewer prefers `cloud_preview.ply`
 - [x] Tests: splat round-trip/USD, presets, fake-remote reconstruction wiring (30 passing)
 - [x] Live verification (2026-06-10): backyard_99s_cloudy.mp4 → 280/280 registered (CPU SIFT), 477,731 gaussians (draft, l4x1, $0.36), cloud.ply 107MB + preview + USD + model.zip checkpoint. Bugs found and fixed along the way: container GPU-SIFT garbage, --vis none removal, HfHubHTTPError fallback bypass, private-Space image 500
+- [x] Standard run COLMAP mapper non-determinism fix (2026-06-10): degenerate RANSAC init pair in incremental mapper (2/280 registered vs expected 280/280). Fix: retry_mapper() re-runs only colmap mapper on existing database with relaxed init (tri-angle 8 then 4, lower inlier floors, multiple_models 0), picks largest model, regenerates transforms via ns-process-data --skip-colmap. Worker rebuilding + Standard rerun chained in background.
 - [ ] OOM auto-retry at next-lower preset (deferred — needs mid-run confirm UX; failures currently suggest a lower preset)
 
 ## M2: Interactive Viewport + Camera Staging (in progress)
@@ -36,6 +39,10 @@ Plan of record: `docs/plans/plan-v1-remote-first-20260609.md` (M0–M6). Legacy 
 - [x] Vendored viewer: three.js 0.160.0 + GaussianSplats3D 0.4.7 under `vaultwares_studio/webviewer/vendor/`
 - [x] `vw://` URL scheme handler (app assets + job artifacts, no web server, path-traversal guarded)
 - [x] Viewport tab v1 (`gui/viewport.py`): loads the job's `cloud.ply` (progressive), orbit/WASD fly, QWebChannel bridge, "Capture Camera" saves poses to `usd/captured_cameras.json`
+- [x] Blender-style axis gizmo (2026-06-10): corner widget with transparent WebGL canvas, click axis balls to snap views, drag to orbit, pole snap avoids singularity
+- [x] SuperSplat-style infinite zoom (2026-06-10): scroll-zoom within 0.4 units pushes pivot forward for continuous scene traversal
+- [x] Embedded-viewport fix (2026-06-10): Mica disabled on FluentWindow + WA_NativeWindow on web view
+- [x] Camera authoring (2026-06-10): walk pattern recreates capture trajectory with collision-free path smoothing and spiral fallback
 - [ ] CameraEntity integration: captured poses → camera_director entities → manifest + USD
 - [ ] Keyframe timeline + Catmull-Rom/slerp camera paths (`camera_paths.py`)
 - [ ] Offline walkthrough via remote `ns-render camera-path` (reuses model.zip from M1)
@@ -43,7 +50,17 @@ Plan of record: `docs/plans/plan-v1-remote-first-20260609.md` (M0–M6). Legacy 
 - [ ] gui_app.py split into `gui/` package (theme, strings, widgets, main_window)
 - [ ] .ksplat conversion for faster viewport loads
 
-## M3+: see plan file (Robot Lab, Cosmos, packaging)
+## M3: Robot Lab (in progress)
+
+- [x] M3 slice 1 shipped (2026-06-10): robot_lab package with NavSimBackend contract, 2.5D occupancy grid from splat preview cloud (floor estimate + body-band obstacles + BFS geodesic field), grid-nav PointNav simulator (forward/turn/stop, goal vector + 16-ray scan, geodesic-progress reward, SPL, reachable-episode sampling), gymnasium wrapper for SB3 PPO, run_episode trajectory recorder for viewport replay. 48 tests passing. Dependencies: gymnasium + stable-baselines3.
+- [ ] Walk-pattern cameras staged after Standard recon lands
+- [ ] Rendering approval from user
+- [ ] PPO training demo on backyard grid
+- [ ] Timeline UI
+- [ ] GUI split
+- [ ] Cost retest
+
+## M3+: see plan file (Cosmos, packaging)
 
 ## Cost optimization (after first green run)
 - [ ] Test GPU *matching* with CPU *extraction* (`--no-gpu` currently disables both; the container bug may be extraction-only). If matching works on GPU, COLMAP drops from ~20 min to ~2 min on the L4 → run cost ~USD 0.15, no orchestration changes.

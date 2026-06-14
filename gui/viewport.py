@@ -32,7 +32,9 @@ from typing import Callable
 
 from PySide6.QtCore import QBuffer, QByteArray, QIODevice, QObject, QUrl, Signal, Slot
 from PySide6.QtWidgets import (
+    QComboBox,
     QFrame,
+    QGridLayout,
     QHBoxLayout,
     QLabel,
     QListWidget,
@@ -54,6 +56,19 @@ _DEFAULT_STRINGS = {
     "viewport_delete": "Delete",
     "viewport_preview_path": "Preview Path",
     "viewport_need_two": "Capture at least 2 cameras to preview a path.",
+    "viewport_pattern_label": "Walk Pattern",
+    "viewport_apply_pattern": "Apply + Preview Pattern",
+    "viewport_pattern_no_preview": "Need cloud_preview.ply before a pattern can be applied.",
+    "viewport_pattern_applied": "Pattern '{name}' applied — render path saved.",
+    "viewport_pattern_failed": "Pattern '{name}' failed: {error}",
+    "viewport_view_top": "Top",
+    "viewport_view_front": "Front",
+    "viewport_view_side": "Side",
+    "viewport_view_iso": "Iso",
+    "viewport_view_flip": "Flip Up",
+    "viewport_section_view": "View",
+    "viewport_section_path": "Walk Path",
+    "viewport_section_captures": "Captures",
 }
 
 try:
@@ -258,19 +273,27 @@ class ViewportTab(QFrame):
         self._job_dir: Path | None = None
 
         layout = QVBoxLayout(self)
-        layout.setContentsMargins(8, 8, 8, 8)
-        layout.setSpacing(6)
+        layout.setContentsMargins(10, 10, 10, 10)
+        layout.setSpacing(8)
 
         toolbar = QHBoxLayout()
+        toolbar.setSpacing(6)
         self.reload_btn = QPushButton(self._t("viewport_reload"), self)
         self.capture_btn = QPushButton(self._t("viewport_capture"), self)
         self.capture_btn.setEnabled(False)
-        self.status_label = QLabel(self._t("viewport_no_scene"), self)
-        self.status_label.setWordWrap(True)
+        for btn in (self.reload_btn, self.capture_btn):
+            btn.setMinimumHeight(30)
         toolbar.addWidget(self.reload_btn)
         toolbar.addWidget(self.capture_btn)
-        toolbar.addWidget(self.status_label, 1)
+        toolbar.addStretch(1)
         layout.addLayout(toolbar)
+
+        # Status line on its own row so long messages don't compress the
+        # toolbar buttons.
+        self.status_label = QLabel(self._t("viewport_no_scene"), self)
+        self.status_label.setWordWrap(True)
+        self.status_label.setStyleSheet("color: palette(mid); padding: 2px 0;")
+        layout.addWidget(self.status_label)
 
         if not WEBENGINE_AVAILABLE:
             fallback = QLabel(self._t("viewport_no_webengine"), self)
@@ -291,28 +314,101 @@ class ViewportTab(QFrame):
         self.web_view.setAttribute(Qt.WidgetAttribute.WA_NativeWindow, True)
         body.addWidget(self.web_view, 1)
 
-        # Captured-cameras panel: reorder/delete the walkthrough stops and
-        # preview the resulting path in the viewer before paying for a render.
+        # Side panel — three sections from top to bottom: View (camera angle
+        # presets), Walk Path (pattern picker), Captures (hand-authored poses).
+        # Each section has a bold header and a thin separator below it to give
+        # a visible hierarchy without leaning on framed cards.
+        from vaultwares_studio.walk_patterns import available_patterns
+
         panel = QVBoxLayout()
-        panel.setSpacing(4)
+        panel.setSpacing(6)
+        panel.setContentsMargins(0, 0, 0, 0)
+
+        def _section_header(key: str) -> QLabel:
+            label = QLabel(self._t(key), self)
+            label.setStyleSheet("font-weight: 600; font-size: 10.5pt; padding: 2px 0;")
+            label.setMaximumWidth(230)
+            return label
+
+        def _separator() -> QFrame:
+            line = QFrame(self)
+            line.setFrameShape(QFrame.Shape.HLine)
+            line.setFrameShadow(QFrame.Shadow.Plain)
+            line.setStyleSheet("color: palette(mid);")
+            line.setMaximumWidth(230)
+            return line
+
+        # ── Section 1: View (camera angle presets) ───────────────────────────
+        panel.addWidget(_section_header("viewport_section_view"))
+        angle_grid = QGridLayout()
+        angle_grid.setSpacing(4)
+        self.view_top_btn = QPushButton(self._t("viewport_view_top"), self)
+        self.view_front_btn = QPushButton(self._t("viewport_view_front"), self)
+        self.view_side_btn = QPushButton(self._t("viewport_view_side"), self)
+        self.view_iso_btn = QPushButton(self._t("viewport_view_iso"), self)
+        self.view_flip_btn = QPushButton(self._t("viewport_view_flip"), self)
+        for btn in (self.view_top_btn, self.view_front_btn, self.view_side_btn,
+                    self.view_iso_btn, self.view_flip_btn):
+            btn.setMinimumHeight(30)
+        angle_grid.addWidget(self.view_top_btn, 0, 0)
+        angle_grid.addWidget(self.view_front_btn, 0, 1)
+        angle_grid.addWidget(self.view_side_btn, 1, 0)
+        angle_grid.addWidget(self.view_iso_btn, 1, 1)
+        angle_grid.addWidget(self.view_flip_btn, 2, 0, 1, 2)
+        panel.addLayout(angle_grid)
+        self.view_top_btn.clicked.connect(lambda: self._snap_view("top"))
+        self.view_front_btn.clicked.connect(lambda: self._snap_view("front"))
+        self.view_side_btn.clicked.connect(lambda: self._snap_view("right"))
+        self.view_iso_btn.clicked.connect(lambda: self._snap_view("iso"))
+        self.view_flip_btn.clicked.connect(self._flip_camera_up)
+        panel.addWidget(_separator())
+
+        # ── Section 2: Walk Path (preset patterns) ───────────────────────────
+        panel.addWidget(_section_header("viewport_section_path"))
+        self.pattern_select = QComboBox(self)
+        self.pattern_select.setMaximumWidth(230)
+        self.pattern_select.setMinimumHeight(30)
+        for name in available_patterns():
+            self.pattern_select.addItem(name)
+        panel.addWidget(self.pattern_select)
+        self.apply_pattern_btn = QPushButton(self._t("viewport_apply_pattern"), self)
+        self.apply_pattern_btn.setMaximumWidth(230)
+        self.apply_pattern_btn.setMinimumHeight(30)
+        panel.addWidget(self.apply_pattern_btn)
+        panel.addWidget(_separator())
+
+        # ── Section 3: Captures (hand-authored camera list) ──────────────────
+        panel.addWidget(_section_header("viewport_section_captures"))
         self.cameras_label = QLabel(self._t("viewport_cameras"), self)
+        self.cameras_label.setStyleSheet("color: palette(mid); padding: 0;")
         panel.addWidget(self.cameras_label)
         self.camera_list = QListWidget(self)
         self.camera_list.setMaximumWidth(230)
+        self.camera_list.setMinimumHeight(100)
         panel.addWidget(self.camera_list, 1)
+
+        # Reorder controls on one row, primary action (preview) below.
+        reorder_row = QHBoxLayout()
+        reorder_row.setSpacing(4)
         self.move_up_btn = QPushButton(self._t("viewport_move_up"), self)
         self.move_down_btn = QPushButton(self._t("viewport_move_down"), self)
         self.delete_btn = QPushButton(self._t("viewport_delete"), self)
+        for btn in (self.move_up_btn, self.move_down_btn, self.delete_btn):
+            btn.setMinimumHeight(28)
+            reorder_row.addWidget(btn)
+        panel.addLayout(reorder_row)
         self.preview_path_btn = QPushButton(self._t("viewport_preview_path"), self)
-        for button in (self.move_up_btn, self.move_down_btn, self.delete_btn, self.preview_path_btn):
-            button.setMaximumWidth(230)
-            panel.addWidget(button)
+        self.preview_path_btn.setMaximumWidth(230)
+        self.preview_path_btn.setMinimumHeight(30)
+        panel.addWidget(self.preview_path_btn)
+
         body.addLayout(panel)
 
         self.move_up_btn.clicked.connect(lambda: self._move_camera(-1))
         self.move_down_btn.clicked.connect(lambda: self._move_camera(1))
         self.delete_btn.clicked.connect(self._delete_camera)
         self.preview_path_btn.clicked.connect(self._preview_path)
+        self.apply_pattern_btn.clicked.connect(self._apply_pattern)
 
         self._page = _ViewportPage(self.web_view.page().profile(), self.web_view, self._set_status)
         self.web_view.setPage(self._page)
@@ -408,13 +504,85 @@ class ViewportTab(QFrame):
         ]
         self.web_view.page().runJavaScript(f"window.playPath({json.dumps(frames)}, 30);")
 
+    def _apply_pattern(self) -> None:
+        """Generate the selected walk pattern, persist as render path, preview live."""
+        if self._job_dir is None or self.web_view is None:
+            return
+        from vaultwares_studio.camera_paths import sample_path, to_nerfstudio_camera_path
+        from vaultwares_studio.walk_patterns import bounds_from_preview_ply, build_pattern
+
+        name = self.pattern_select.currentText()
+        preview_ply = self._job_dir / "reconstruction" / "cloud_preview.ply"
+        if not preview_ply.exists():
+            self._set_status(self._t("viewport_pattern_no_preview"))
+            return
+        try:
+            bounds = bounds_from_preview_ply(preview_ply)
+            params: dict = {}
+            if name == "retrace_steps":
+                # Look for the Nerfstudio dataparser transforms shipped with the
+                # reconstruction; fail with a readable status if missing.
+                transforms = self._find_transforms_json()
+                if transforms is None:
+                    raise FileNotFoundError("No transforms.json available for retrace_steps.")
+                params["transforms_json"] = transforms
+            entity = build_pattern(name, bounds, **params)
+        except Exception as exc:  # noqa: BLE001 - surface to user, never crash GUI
+            self._set_status(self._t("viewport_pattern_failed").format(name=name, error=exc))
+            return
+
+        # Persist as the active render path so cosmos_output renders this
+        # walkthrough instead of falling back to the default orbit.
+        render_path = self._job_dir / "usd" / "camera_path.json"
+        render_path.parent.mkdir(parents=True, exist_ok=True)
+        render_path.write_text(
+            json.dumps(to_nerfstudio_camera_path(entity), indent=2), encoding="utf-8"
+        )
+
+        # Live preview through the existing playPath JS hook.
+        frames = [
+            {"position": [float(v) for v in pos], "lookAt": [float(v) for v in target]}
+            for pos, target in sample_path(entity, fps=30)
+        ]
+        self.web_view.page().runJavaScript(f"window.playPath({json.dumps(frames)}, 30);")
+        self._set_status(self._t("viewport_pattern_applied").format(name=name))
+
+    def _snap_view(self, view_name: str) -> None:
+        if self.web_view is None:
+            return
+        self.web_view.page().runJavaScript(f"window.snapToView({json.dumps(view_name)});")
+
+    def _flip_camera_up(self) -> None:
+        if self.web_view is None:
+            return
+        self.web_view.page().runJavaScript("window.flipCameraUp();")
+
+    def _find_transforms_json(self) -> Path | None:
+        """Best-effort lookup for the Nerfstudio dataparser transforms file."""
+        if self._job_dir is None:
+            return None
+        candidates = [
+            self._job_dir / "reconstruction" / "transforms.json",
+            self._job_dir / "reconstruction" / "remote_out" / "transforms.json",
+            self._job_dir / "reconstruction" / "remote_out" / "dataparser_transforms.json",
+        ]
+        for candidate in candidates:
+            if candidate.exists():
+                return candidate
+        return None
+
     def reload_scene(self) -> None:
         if self.web_view is None or self._job_dir is None:
             return
-        splat = self._job_dir / "reconstruction" / "cloud.ply"
+        # Prefer the packed .splat (~7x smaller than the PLY and the viewer
+        # skips PLY header parsing). Fall back to cloud.ply for legacy jobs
+        # that pre-date the packer.
+        packed = self._job_dir / "reconstruction" / "cloud.splat"
+        ply = self._job_dir / "reconstruction" / "cloud.ply"
+        splat = packed if packed.exists() else ply
         url = QUrl(self._server.url())
         if splat.exists():
-            query = ["scene=job/reconstruction/cloud.ply"]
+            query = [f"scene=job/reconstruction/{splat.name}"]
             frame = self._scene_framing()
             if frame:
                 query.append(frame)

@@ -192,8 +192,16 @@ window.playPath = function playPath(framesJson, fps) {
 
   function step(now) {
     if (playback.cancelled) return;
-    const index = Math.min(frames.length - 1, Math.floor((now - startedAt) / frameMs));
+    // requestAnimationFrame's `now` and performance.now() can use slightly
+    // different time origins in QtWebEngine, so clamp the index into range
+    // and skip the frame entirely if data is malformed.
+    const raw = Math.floor((now - startedAt) / frameMs);
+    const index = Math.max(0, Math.min(frames.length - 1, raw));
     const frame = frames[index];
+    if (!frame || !frame.position || !frame.lookAt) {
+      playback.handle = requestAnimationFrame(step);
+      return;
+    }
     viewer.camera.position.set(frame.position[0], frame.position[1], frame.position[2]);
     if (viewer.controls) {
       viewer.controls.target.set(frame.lookAt[0], frame.lookAt[1], frame.lookAt[2]);
@@ -224,6 +232,54 @@ window.captureCamera = function captureCamera() {
   };
   if (bridge) bridge.cameraCaptured(JSON.stringify(pose));
   setStatus('Camera captured.');
+};
+
+// Snap the orbit camera to a named view direction relative to its current
+// target. Preserves the current orbit distance and forces world +Y as up so
+// the result is always upright (use flipCameraUp afterwards if you want it
+// inverted). Direction vectors are in world space; "top" looks DOWN at the
+// scene from +Y, "front" looks at the scene from +Z, etc.
+window.snapToView = function snapToView(viewName) {
+  if (!viewer || !viewer.controls) return;
+  const dirs = {
+    top:    [0,  1, 0],
+    bottom: [0, -1, 0],
+    front:  [0,  0, 1],
+    back:   [0,  0,-1],
+    left:   [-1, 0, 0],
+    right:  [1,  0, 0],
+    iso:    [1,  0.6, 1],
+  };
+  const dir = dirs[String(viewName).toLowerCase()];
+  if (!dir) return;
+  const camera = viewer.camera;
+  const target = viewer.controls.target.clone();
+  const distance = Math.max(camera.position.distanceTo(target), 0.5);
+  const direction = new THREE.Vector3(dir[0], dir[1], dir[2]).normalize();
+  // Dodge the gimbal pole when snapping straight up/down (same trick the
+  // axis gizmo already uses): nudge the direction slightly so OrbitControls
+  // doesn't end up in the clamped-polar corner.
+  if (Math.abs(direction.y) > 0.999) {
+    direction.add(new THREE.Vector3(0, 0, 0.02)).normalize();
+  }
+  camera.position.copy(target).addScaledVector(direction, distance);
+  camera.up.set(0, 1, 0);
+  camera.lookAt(target);
+  viewer.controls.update();
+  setStatus(`Snapped to ${viewName}.`);
+};
+
+// Roll the camera 180 degrees around its forward axis. Useful when the orbit
+// has somehow ended up upside-down (rare, but the pole clamp doesn't catch
+// every weird state) — gives a one-click "right myself" button.
+window.flipCameraUp = function flipCameraUp() {
+  if (!viewer) return;
+  const camera = viewer.camera;
+  camera.up.set(-camera.up.x, -camera.up.y, -camera.up.z);
+  const target = viewer.controls ? viewer.controls.target : { x: 0, y: 0, z: 0 };
+  camera.lookAt(target.x, target.y, target.z);
+  if (viewer.controls) viewer.controls.update();
+  setStatus('Camera up flipped.');
 };
 
 async function main() {
@@ -264,8 +320,13 @@ async function main() {
 
   setStatus('Loading splat scene…');
   try {
+    // Pick the loader from the scene path extension so the same code path
+    // serves cloud.ply (legacy) and the packed cloud.splat (current default).
+    let format = GaussianSplats3D.SceneFormat.Ply;
+    if (scene.endsWith('.splat')) format = GaussianSplats3D.SceneFormat.Splat;
+    else if (scene.endsWith('.ksplat')) format = GaussianSplats3D.SceneFormat.KSplat;
     await viewer.addSplatScene(scene, {
-      format: GaussianSplats3D.SceneFormat.Ply,
+      format,
       progressiveLoad: true,
       showLoadingUI: true,
       onProgress: (pct, label, stage) => {
@@ -273,6 +334,22 @@ async function main() {
       },
     });
     viewer.start();
+    // Keep the orbit away from the poles. OrbitControls allows phi in [0, π]
+    // by default, so dragging through straight-up or straight-down crosses the
+    // gimbal pole and snaps the camera roll by 180° on two axes at once — reads
+    // as the camera flipping "inverted on 2 axes". The axis gizmo already does
+    // the same clamp at 0.05; mirror it here on the main controls.
+    if (viewer.controls) {
+      viewer.controls.minPolarAngle = 0.05;
+      viewer.controls.maxPolarAngle = Math.PI - 0.05;
+      // OrbitControls defaults feel hot inside QWebEngineView — DPI scaling
+      // amplifies mouse deltas. Halving rotate/pan/zoom speed brings the
+      // feel closer to a desktop three.js viewer.
+      viewer.controls.rotateSpeed = 0.5;
+      viewer.controls.panSpeed = 0.5;
+      viewer.controls.zoomSpeed = 0.6;
+      viewer.controls.update();
+    }
     setupAxisGizmo(() => viewer.camera, () => viewer.controls);
     // Infinite zoom: orbit controls asymptote at the target and feel like a
     // wall. When zooming in close, push the target forward so scrolling
@@ -288,7 +365,88 @@ async function main() {
         viewer.controls.update();
       }
     }, { passive: true });
-    setStatus('Scene loaded — drag to orbit, scroll to zoom, WASD to fly.');
+
+    // Pointer leave / re-enter teleport fix.
+    //
+    // OrbitControls calls setPointerCapture on pointerdown, but Qt's
+    // WebEngineView does not reliably forward pointer events once the cursor
+    // leaves the widget bounds. If the user releases the button outside the
+    // viewport the embedded Chromium never sees pointerup; when they come
+    // back in, the next pointermove delta is huge and the camera teleports.
+    // Synthesise a pointerup on pointerleave so the drag ends cleanly.
+    const rendererCanvas = viewer.renderer && viewer.renderer.domElement;
+    if (rendererCanvas) {
+      const activePointers = new Set();
+      rendererCanvas.addEventListener('pointerdown', (event) => {
+        activePointers.add(event.pointerId);
+      });
+      rendererCanvas.addEventListener('pointerup', (event) => {
+        activePointers.delete(event.pointerId);
+      });
+      rendererCanvas.addEventListener('pointercancel', (event) => {
+        activePointers.delete(event.pointerId);
+      });
+      rendererCanvas.addEventListener('pointerleave', () => {
+        for (const pointerId of activePointers) {
+          rendererCanvas.dispatchEvent(new PointerEvent('pointerup', {
+            pointerId, bubbles: true, cancelable: true,
+          }));
+        }
+        activePointers.clear();
+      });
+    }
+
+    // Real WASD fly. OrbitControls only orbits around its fixed target, so the
+    // user can't actually translate toward a point in the scene that isn't the
+    // current target — they end up arcing past it. Mutating BOTH camera.position
+    // and controls.target by the same delta moves the orbit pivot with the
+    // camera, so WASD feels like first-person walking. QE raises/lowers along
+    // world up; Shift speeds up.
+    const heldKeys = new Set();
+    const keyTargets = new Set(['w', 'a', 's', 'd', 'q', 'e', 'shift']);
+    window.addEventListener('keydown', (event) => {
+      const key = event.key.toLowerCase();
+      if (keyTargets.has(key)) heldKeys.add(key);
+    });
+    window.addEventListener('keyup', (event) => {
+      heldKeys.delete(event.key.toLowerCase());
+    });
+    window.addEventListener('blur', () => heldKeys.clear());
+
+    let lastFrameMs = performance.now();
+    function flyTick(now) {
+      const dt = Math.min(0.1, (now - lastFrameMs) / 1000);
+      lastFrameMs = now;
+      requestAnimationFrame(flyTick);
+      if (!viewer.controls || heldKeys.size === 0) return;
+      const camera = viewer.camera;
+      const target = viewer.controls.target;
+      const forward = new THREE.Vector3().subVectors(target, camera.position);
+      const distance = forward.length();
+      if (distance < 1e-4) return;
+      forward.normalize();
+      const right = new THREE.Vector3().crossVectors(forward, camera.up).normalize();
+      // Scale move speed with the orbit distance so the same key feel works at
+      // both far and close framings. The multipliers were tuned down (0.6 ->
+      // 0.35, floor 0.4 -> 0.25) after user feedback that fly was too hot;
+      // Shift sprint still gives 3x for fast traversal.
+      const baseSpeed = Math.max(0.25, distance * 0.35);
+      const speed = baseSpeed * (heldKeys.has('shift') ? 3 : 1) * dt;
+      const delta = new THREE.Vector3();
+      if (heldKeys.has('w')) delta.addScaledVector(forward, speed);
+      if (heldKeys.has('s')) delta.addScaledVector(forward, -speed);
+      if (heldKeys.has('d')) delta.addScaledVector(right, speed);
+      if (heldKeys.has('a')) delta.addScaledVector(right, -speed);
+      if (heldKeys.has('e')) delta.y += speed;
+      if (heldKeys.has('q')) delta.y -= speed;
+      if (delta.lengthSq() === 0) return;
+      camera.position.add(delta);
+      target.add(delta);
+      viewer.controls.update();
+    }
+    requestAnimationFrame(flyTick);
+
+    setStatus('Scene loaded — drag to orbit, WASD to fly, Shift to sprint, scroll to zoom.');
   } catch (error) {
     setStatus(`Failed to load scene: ${error.message || error}`);
     console.error(error);

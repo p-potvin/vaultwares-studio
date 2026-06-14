@@ -126,394 +126,32 @@ from vaultwares_studio.runners import (
     set_hf_token,
 )
 from vaultwares_studio.viewer import open_live_viewer
+from gui.signals import TaskSignals
+from gui.strings import STATE_LABELS, get_active_lang, set_active_lang, t as _t
+from gui.styles import (
+    accent_card_style,
+    build_stylesheet,
+    card_style,
+    preview_style,
+    state_card_style,
+)
+from gui.theme import VaultTheme, VaultThemeManager, bootstrap_theme, detect_os_theme
 from gui.viewport import ViewportTab, register_viewer_scheme
 
 ROOT = Path(__file__).resolve().parent
 ICON_PATH = ROOT / "Brand" / "favicons" / "vaultwares-favicon-gold-filled-256.png"
 
-sys.path.insert(0, str(ROOT / "vaultwares-themes"))
-try:
-    from theme_manager import VaultTheme, VaultThemeManager  # noqa: E402
-except ImportError as _exc:
-    raise RuntimeError(
-        "vault-themes submodule not found. Run: git submodule update --init vault-themes"
-    ) from _exc
-
-
-def _detect_os_theme() -> str:
-    try:
-        import winreg  # noqa: PLC0415
-        with winreg.OpenKey(
-            winreg.HKEY_CURRENT_USER,
-            r"Software\Microsoft\Windows\CurrentVersion\Themes\Personalize",
-        ) as key:
-            value, _ = winreg.QueryValueEx(key, "AppsUseLightTheme")
-            return "light" if value == 1 else "dark"
-    except Exception:  # noqa: BLE001
-        return "dark"
-
-
 _settings = QSettings("VaultWares", "VaultwaresStudio")
 _tm = VaultThemeManager()
-_saved_theme_name = _settings.value("theme", None)
-if _saved_theme_name:
-    _active_theme_result = _tm.get_theme_by_name(str(_saved_theme_name))
-    _active_theme = _active_theme_result if _active_theme_result else _tm.get_theme("Golden Slate")
-else:
-    _active_theme_result = _tm.get_theme_by_name(
-        "Solarized Light Revisited" if _detect_os_theme() == "light" else "Golden Slate"
-    )
-    _active_theme = _active_theme_result if _active_theme_result else _tm.get_theme("Golden Slate")
+_active_theme = bootstrap_theme(_settings, _tm)
 
 
-def build_stylesheet(theme: VaultTheme) -> str:  # noqa: PLR0914
-    bg = theme.background
-    surface = theme.surface
-    surface_alt = theme.surface_alt
-    surface_el = theme.surface_elevated
-    text = theme.text_primary
-    text_sec = theme.text_secondary
-    text_mut = theme.text_muted
-    text_inv = theme.text_inverse
-    accent = theme.accent
-    accent_m = theme.accent_muted
-    border = theme.border
-    muted = theme.muted
-    return f"""
-QWidget {{
-    background: {bg};
-    color: {text};
-    font-family: "Segoe UI Semilight", "Segoe UI", "Inter", system-ui, sans-serif;
-    font-size: 10pt;
-}}
-QMainWindow, QDialog {{ background: {bg}; }}
-QFrame {{
-    background: {surface};
-    border: none;
-    border-radius: 0px;
-}}
-/* ── Scroll areas ──────────────────────────── */
-QScrollArea {{
-    background: transparent;
-    border: none;
-}}
-QScrollArea > QWidget, QScrollArea > QWidget > QWidget {{
-    background: transparent;
-}}
-/* ── Scroll bars ───────────────────────────── */
-QScrollBar:vertical {{
-    background: {surface_alt};
-    width: 8px;
-    border-radius: 4px;
-    margin: 0;
-}}
-QScrollBar::handle:vertical {{
-    background: {muted};
-    border-radius: 4px;
-    min-height: 24px;
-}}
-QScrollBar::handle:vertical:hover {{ background: {accent}; }}
-QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical,
-QScrollBar::add-page:vertical, QScrollBar::sub-page:vertical {{
-    background: none; height: 0; width: 0;
-}}
-QScrollBar:horizontal {{
-    background: {surface_alt};
-    height: 8px;
-    border-radius: 4px;
-    margin: 0;
-}}
-QScrollBar::handle:horizontal {{
-    background: {muted};
-    border-radius: 4px;
-    min-width: 24px;
-}}
-QScrollBar::handle:horizontal:hover {{ background: {accent}; }}
-QScrollBar::add-line:horizontal, QScrollBar::sub-line:horizontal,
-QScrollBar::add-page:horizontal, QScrollBar::sub-page:horizontal {{
-    background: none; height: 0; width: 0;
-}}
-/* ── Push buttons ──────────────────────────── */
-QPushButton {{
-    background: {surface_el};
-    color: {text};
-    border: 1px solid {border};
-    border-radius: 6px;
-    padding: 7px 16px;
-    font-size: 10pt;
-    min-height: 32px;
-}}
-QPushButton:hover {{
-    background: {accent};
-    color: {text_inv};
-    border-color: {accent};
-}}
-QPushButton:pressed {{
-    background: {accent_m};
-    color: {text_inv};
-}}
-QPushButton:disabled {{
-    background: {surface_alt};
-    color: {muted};
-    border-color: {border};
-}}
-/* ── Line edits ────────────────────────────── */
-QLineEdit {{
-    background: {surface_el};
-    color: {text};
-    border: 1px solid {border};
-    border-radius: 6px;
-    padding: 8px 12px;
-    font-size: 10pt;
-    min-height: 36px;
-    selection-background-color: {accent};
-    selection-color: {text_inv};
-}}
-QLineEdit:focus {{ border: 1px solid {accent}; }}
-/* ── Text edits (log view) ─────────────────── */
-QTextEdit {{
-    background: {surface_el};
-    color: {text};
-    border: 1px solid {border};
-    border-radius: 6px;
-    padding: 8px;
-    font-family: "Consolas", "Cascadia Code", "Courier New", monospace;
-    font-size: 9pt;
-    selection-background-color: {accent};
-    selection-color: {text_inv};
-}}
-QTextEdit:focus {{ border: 1px solid {accent}; }}
-/* ── List widget ───────────────────────────── */
-QListWidget {{
-    background: {surface_el};
-    color: {text};
-    border: 1px solid {border};
-    border-radius: 6px;
-    padding: 4px;
-    outline: none;
-}}
-QListWidget::item {{
-    padding: 8px 12px;
-    border-radius: 4px;
-    color: {text};
-}}
-QListWidget::item:hover {{ background: {surface_alt}; }}
-QListWidget::item:selected {{ background: {accent}; color: {text_inv}; }}
-/* ── Combo box ─────────────────────────────── */
-QComboBox {{
-    background: {surface_el};
-    color: {text};
-    border: 1px solid {border};
-    border-radius: 6px;
-    padding: 6px 12px;
-    min-height: 32px;
-    font-size: 10pt;
-}}
-QComboBox:hover, QComboBox:focus {{ border: 1px solid {accent}; }}
-QComboBox::drop-down {{
-    border: none;
-    width: 24px;
-    border-left: 1px solid {border};
-}}
-QComboBox QAbstractItemView {{
-    background: {surface_el};
-    color: {text};
-    border: 1px solid {border};
-    border-radius: 4px;
-    selection-background-color: {accent};
-    selection-color: {text_inv};
-    padding: 4px;
-    outline: none;
-}}
-/* ── Progress bar ──────────────────────────── */
-QProgressBar {{
-    background: {surface_alt};
-    border: none;
-    border-radius: 4px;
-    max-height: 6px;
-    min-height: 6px;
-}}
-QProgressBar::chunk {{ background: {accent}; border-radius: 4px; }}
-/* ── Labels ────────────────────────────────── */
-QLabel {{ background: transparent; color: {text}; }}
-/* ── Splitter ──────────────────────────────── */
-QSplitter::handle {{ background: {border}; }}
-QSplitter::handle:horizontal {{ width: 4px; margin: 2px 0; }}
-QSplitter::handle:vertical   {{ height: 4px; margin: 0 2px; }}
-QSplitter::handle:hover      {{ background: {accent_m}; }}
-/* ── Tab widget (fallback) ─────────────────── */
-QTabWidget::pane {{
-    border: 1px solid {border};
-    border-radius: 8px;
-    background: {surface};
-}}
-QTabBar::tab {{
-    background: {surface_alt};
-    color: {text_sec};
-    padding: 8px 20px;
-    border-top-left-radius: 6px;
-    border-top-right-radius: 6px;
-    border: 1px solid {border};
-    margin-right: 2px;
-}}
-QTabBar::tab:selected {{ background: {surface}; color: {text}; border-bottom-color: {surface}; }}
-QTabBar::tab:hover    {{ background: {surface_el}; color: {text}; }}
-"""
+# Backwards-compat shim: a couple of older call sites read this private name.
+_detect_os_theme = detect_os_theme
 
 
-def card_style(theme: VaultTheme) -> str:
-    return (
-        f"QFrame {{ background: {theme.surface}; border: 1px solid {theme.border};"
-        " border-radius: 8px; }}"
-    )
+# Theme/styles/strings/signals now live in gui/{theme,styles,strings,signals}.py — see imports above.
 
-
-def accent_card_style(theme: VaultTheme) -> str:
-    return (
-        f"QFrame {{ background: {theme.surface_elevated}; border: 1px solid {theme.accent};"
-        " border-radius: 8px; }}"
-    )
-
-
-def preview_style(theme: VaultTheme) -> str:
-    return (
-        f"QLabel {{ background: {theme.surface_elevated}; color: {theme.text_secondary};"
-        f" border: 1px dashed {theme.text_muted}; border-radius: 8px;"
-        " min-height: 120px; padding: 12px; }}"
-    )
-
-
-def state_card_style(theme: VaultTheme, state: str) -> str:
-    if state == StageState.COMPLETE.value:
-        left_color = theme.success
-    elif state == StageState.FAILED.value:
-        left_color = theme.error
-    elif state == StageState.RUNNING.value:
-        left_color = theme.accent_muted
-    else:
-        left_color = theme.border
-    return (
-        f"QFrame {{ background: {theme.surface}; border: 1px solid {theme.border};"
-        f" border-left: 4px solid {left_color}; border-radius: 8px; }}"
-    )
-STATE_LABELS = {
-    StageState.QUEUED.value: "Queued",
-    StageState.RUNNING.value: "Running",
-    StageState.NEEDS_INSTALL.value: "Needs Install",
-    StageState.NEEDS_USER_INPUT.value: "Needs User Input",
-    StageState.COMPLETE.value: "Complete",
-    StageState.FAILED.value: "Failed",
-}
-
-
-# ── Localisation (EN / QC French) ────────────────────────────────────────────
-_active_lang: str = str(_settings.value("general/lang", "EN"))
-_STRINGS: dict[str, dict[str, str]] = {
-    "app_title":             {"EN": "Digital Twin Studio",                    "QC": "Studio de jumeau numérique"},
-    "tab_studio":            {"EN": "Studio",                                  "QC": "Studio"},
-    "tab_settings":          {"EN": "Settings",                                "QC": "Paramètres"},
-    "current_job":           {"EN": "Current Job",                             "QC": "Travail actuel"},
-    "source_video":          {"EN": "Source Video",                            "QC": "Vidéo source"},
-    "choose_video":          {"EN": "Choose Video",                            "QC": "Choisir une vidéo"},
-    "use_demo_video":        {"EN": "Use Demo Video",                          "QC": "Vidéo de démonstration"},
-    "open_latest_job":       {"EN": "Open Latest Job",                         "QC": "Dernier travail"},
-    "open_manifest":         {"EN": "Open Job Manifest",                       "QC": "Ouvrir le manifeste"},
-    "job_steps":             {"EN": "Job Steps",                               "QC": "Étapes du travail"},
-    "run_full_job":          {"EN": "Run Full Job",                            "QC": "Exécuter tout le travail"},
-    "run_selected_step":     {"EN": "Run Selected Step",                       "QC": "Exécuter l'étape"},
-    "open_job_folder":       {"EN": "Open Job Folder",                         "QC": "Ouvrir le dossier"},
-    "run_state":             {"EN": "Run State",                               "QC": "État d'exécution"},
-    "prompt_camera":         {"EN": "Prompt Camera Director",                  "QC": "Inviter le directeur de caméra"},
-    "save_prompt":           {"EN": "Save Prompt",                             "QC": "Enregistrer l'invite"},
-    "stage_previews":        {"EN": "Stage Previews",                          "QC": "Aperçus de l'étape"},
-    "artifacts":             {"EN": "Artifacts",                               "QC": "Artéfacts"},
-    "run_log":               {"EN": "Run Log",                                 "QC": "Journal d'exécution"},
-    "clear_log":             {"EN": "Clear",                                   "QC": "Effacer"},
-    "return_to_finish":      {"EN": "Return to Final Review",                  "QC": "Retour à la révision finale"},
-    "final_review":          {"EN": "Final Review",                            "QC": "Révision finale"},
-    "open_walkthrough":      {"EN": "Open Walkthrough Video",                  "QC": "Vidéo de visite guidée"},
-    "open_3d_viewer":        {"EN": "Open Live 3D Viewer",                     "QC": "Visualiseur 3D en direct"},
-    "open_output_folder":    {"EN": "Open Output Folder",                      "QC": "Dossier de sortie"},
-    "integration":           {"EN": "VaultWares Integration",                  "QC": "Intégration VaultWares"},
-    "api_url_label":         {"EN": "API Base URL",                            "QC": "URL de base de l'API"},
-    "app_url_label":         {"EN": "App URL (Vault Flows)",                   "QC": "URL de l'application"},
-    "bearer_label":          {"EN": "Bearer Token (optional)",                 "QC": "Jeton porteur (optionnel)"},
-    "api_key_label":         {"EN": "API Key (optional)",                      "QC": "Clé API (optionnelle)"},
-    "test_api":              {"EN": "Test API",                                "QC": "Tester l'API"},
-    "export_workflow":       {"EN": "Export Workflow JSON",                    "QC": "Exporter le flux JSON"},
-    "push_workflow":         {"EN": "Push Workflow",                           "QC": "Pousser le flux de travail"},
-    "open_vault_flows":      {"EN": "Open Vault Flows",                        "QC": "Ouvrir Vault Flows"},
-    "inspect_steps":         {"EN": "Inspect Previous Steps",                  "QC": "Inspecter les étapes précédentes"},
-    "inspect_note":          {"EN": "The step rail remains live. Click any earlier step to reopen its viewer, previews, logs, and artifacts.",
-                              "QC": "Le rail d'étapes reste actif. Cliquez sur une étape précédente pour rouvrir son visualiseur, ses aperçus, ses journaux et ses artéfacts."},
-    "execution_mode_safe":   {"EN": "Execution mode: fallback-safe for local hardware.",
-                              "QC": "Mode d'exécution : sécurisé pour le matériel local."},
-    "execution_mode_strict": {"EN": "Execution mode: strict. Missing heavy tools fail the active stage.",
-                              "QC": "Mode strict : les outils manquants font échouer l'étape active."},
-    "enable_strict":         {"EN": "Enable Strict Tool Mode",                 "QC": "Activer le mode strict"},
-    "disable_strict":        {"EN": "Disable Strict Tool Mode",                "QC": "Désactiver le mode strict"},
-    "refresh_health":        {"EN": "Refresh Dependency Health",               "QC": "Vérifier les dépendances"},
-    "health_title":          {"EN": "Dependency Health",                       "QC": "État des dépendances"},
-    "theme_label":           {"EN": "Theme",                                   "QC": "Thème"},
-    "preview_pending":       {"EN": "Preview pending",                         "QC": "Aperçu en attente"},
-    "finish_summary":        {"EN": "The digital twin job completed. Open the final walkthrough video, launch the optional live 3D viewer, or inspect any previous step from the rail.",
-                              "QC": "Le travail de jumeau numérique est terminé. Ouvrez la vidéo de visite finale, lancez le visualiseur 3D optionnel, ou inspectez une étape précédente."},
-    "ready_to_execute":      {"EN": "Ready to execute the selected stage.",
-                              "QC": "Prêt à exécuter l'étape sélectionnée."},
-    "complete_earlier":      {"EN": "Complete earlier stages first, or use Run Full Job.",
-                              "QC": "Terminez d'abord les étapes précédentes, ou utilisez Exécuter tout le travail."},
-    "lang_switch_label":     {"EN": "FR",                                      "QC": "EN"},
-    "no_video_yet":          {"EN": "No walkthrough video has been generated yet.",
-                              "QC": "Aucune vidéo de visite n'a encore été générée."},
-    "strict_off":            {"EN": "Strict mode: OFF",                        "QC": "Mode strict : OFF"},
-    "strict_on":             {"EN": "Strict mode: ON",                         "QC": "Mode strict : ON"},
-    "remote_title":          {"EN": "Remote Compute (Hugging Face Jobs)",      "QC": "Calcul à distance (Hugging Face Jobs)"},
-    "hf_token_label":        {"EN": "HF Token (stored in OS keyring)",         "QC": "Jeton HF (stocké dans le trousseau)"},
-    "hf_repo_label":         {"EN": "Artifact dataset repo (blank = auto)",    "QC": "Dépôt d'artéfacts (vide = auto)"},
-    "hf_flavor_label":       {"EN": "Default GPU flavor",                      "QC": "Type de GPU par défaut"},
-    "save_remote":           {"EN": "Save Remote Settings",                    "QC": "Enregistrer les paramètres"},
-    "test_remote":           {"EN": "Run Echo Test Job (cpu-basic)",           "QC": "Tester avec un travail écho (cpu-basic)"},
-    "remote_cost_title":     {"EN": "Confirm paid remote job",                 "QC": "Confirmer le travail payant"},
-    "remote_cost_body":      {"EN": "This will launch a paid Hugging Face Job:\n{estimate}\n\nProceed?",
-                              "QC": "Ceci lancera un travail Hugging Face payant :\n{estimate}\n\nContinuer ?"},
-    "remote_saved":          {"EN": "Remote settings saved.",                  "QC": "Paramètres enregistrés."},
-    "remote_no_token":       {"EN": "No HF token configured. Paste your token and save first.",
-                              "QC": "Aucun jeton HF configuré. Collez votre jeton et enregistrez d'abord."},
-    "preset_label":          {"EN": "Quality preset",                            "QC": "Préréglage de qualité"},
-    "tab_viewport":          {"EN": "Viewport",                                  "QC": "Vue 3D"},
-    "viewport_reload":       {"EN": "Reload Scene",                              "QC": "Recharger la scène"},
-    "viewport_capture":      {"EN": "Capture Camera",                            "QC": "Capturer la caméra"},
-    "viewport_loading":      {"EN": "Loading reconstruction…",                   "QC": "Chargement de la reconstruction…"},
-    "viewport_no_scene":     {"EN": "No reconstruction yet — run a job, then reload.",
-                              "QC": "Aucune reconstruction — exécutez un travail, puis rechargez."},
-    "viewport_no_webengine": {"EN": "QtWebEngine is unavailable on this system. Use the Open Live 3D Viewer button instead.",
-                              "QC": "QtWebEngine n'est pas disponible. Utilisez plutôt le visualiseur 3D en direct."},
-    "viewport_captured":     {"EN": "Camera captured ({count} total) — saved to captured_cameras.json.",
-                              "QC": "Caméra capturée ({count} au total) — enregistrée dans captured_cameras.json."},
-    "viewport_cameras":      {"EN": "Captured cameras",                          "QC": "Caméras capturées"},
-    "viewport_move_up":      {"EN": "Move Up",                                   "QC": "Monter"},
-    "viewport_move_down":    {"EN": "Move Down",                                 "QC": "Descendre"},
-    "viewport_delete":       {"EN": "Delete",                                    "QC": "Supprimer"},
-    "viewport_preview_path": {"EN": "Preview Path",                              "QC": "Aperçu du trajet"},
-    "viewport_need_two":     {"EN": "Capture at least 2 cameras to preview a path.",
-                              "QC": "Capturez au moins 2 caméras pour prévisualiser un trajet."},
-    "remote_declined":       {"EN": "Remote reconstruction declined; using the local quick path.",
-                              "QC": "Reconstruction à distance refusée; utilisation du chemin local rapide."},
-}
-
-
-def _t(key: str) -> str:
-    """Return the localised UI string for the currently active language."""
-    entry = _STRINGS.get(key, {})
-    return entry.get(_active_lang, entry.get("EN", key))
-
-
-
-class TaskSignals(QObject):
-    log = Signal(str)
-    manifest_changed = Signal(object)
-    running_changed = Signal(bool)
-    api_test_finished = Signal(bool, str)
 
 
 def _latest_started_manifest() -> JobManifest | None:
@@ -1142,7 +780,7 @@ class DashboardWidget(QFrame):
         self.header_theme_combo.setCurrentText(_active_theme.name)
         self.header_theme_combo.setFixedWidth(180)
         h_layout.addWidget(self.header_theme_combo)
-        self.lang_btn = QPushButton("EN / QC" if _active_lang == "EN" else "QC / EN", self._header_frame)
+        self.lang_btn = QPushButton("EN / QC" if get_active_lang() == "EN" else "QC / EN", self._header_frame)
         self.lang_btn.setFixedWidth(80)
         h_layout.addWidget(self.lang_btn)
         self.header_theme_combo.currentIndexChanged.connect(self._on_header_theme_changed)
@@ -1183,12 +821,12 @@ class DashboardWidget(QFrame):
             self.theme_changed.emit(theme)
 
     def _toggle_language(self) -> None:
-        global _active_lang
-        _active_lang = "QC" if _active_lang == "EN" else "EN"
-        _settings.setValue("general/lang", _active_lang)
-        self.lang_btn.setText("EN / QC" if _active_lang == "EN" else "QC / EN")
+        next_lang = "QC" if get_active_lang() == "EN" else "EN"
+        set_active_lang(next_lang)
+        _settings.setValue("general/lang", next_lang)
+        self.lang_btn.setText("EN / QC" if next_lang == "EN" else "QC / EN")
         self.retranslate()
-        self.lang_changed.emit(_active_lang)
+        self.lang_changed.emit(next_lang)
 
     def retranslate(self) -> None:
         # left column
@@ -1287,6 +925,11 @@ class DashboardWidget(QFrame):
         self.log_view.clear()
         self._append_log(f"Opened job {manifest.job_id}")
         self._render_manifest()
+        # Without this, the viewport tab keeps the initial _job_dir from app
+        # startup (typically a half-completed "latest" job that has no
+        # cloud.ply), so Reload Scene takes the no-cloud branch and the page
+        # shows "No scene loaded".
+        self.signals.manifest_changed.emit(manifest)
 
     def _reset_job(self, source_video: Path) -> None:
         if self.is_running:
@@ -1436,7 +1079,10 @@ class DashboardWidget(QFrame):
         else:
             self.step_message.setText(stage.message or "This stage has not started yet.")
 
-        show_prompt = stage.key == "usd_cameras"
+        # Legacy "usd_cameras" key also accepted for jobs created before the
+        # camera_staging rename — the from_dict migration remaps the key, but
+        # this defends against any pre-migration callers.
+        show_prompt = stage.key in {"camera_staging", "usd_cameras"}
         self.camera_prompt_card.setVisible(show_prompt)
         self.return_to_finish_btn.setVisible(self.manifest.state == StageState.COMPLETE.value)
 

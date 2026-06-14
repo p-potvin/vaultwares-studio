@@ -1,3 +1,27 @@
+# add new here
+inputs/
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 # Byte-compiled / optimized / DLL files
 __pycache__/
 *.py[codz]
@@ -224,3 +248,6 @@ __marimo__/
 tools/colmap/*
 # per-machine remote compute config (token lives in the OS keyring)
 data/remote_compute.json
+Depth*
+Screen*
+inputs/

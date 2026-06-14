@@ -31,7 +31,7 @@ def test_create_job_manifest_writes_resumable_job():
         "video_intake",
         "frame_extraction",
         "reconstruction",
-        "usd_cameras",
+        "camera_staging",
         "cosmos_output",
     ]
     assert next_incomplete_stage_key(loaded) == "video_intake"

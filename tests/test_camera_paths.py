@@ -102,7 +102,7 @@ def test_author_usd_camera_time_samples(tmp_path):
     assert prim.GetAttribute("vw:cameraName").Get() == "Test Path"
 
 
-def test_usd_cameras_stage_integrates_captures():
+def test_camera_staging_stage_integrates_captures():
     from vaultwares_studio.pipeline import (
         DEFAULT_SOURCE_VIDEO,
         DigitalTwinStudioRunner,
@@ -127,14 +127,79 @@ def test_usd_cameras_stage_integrates_captures():
     )
 
     runner = DigitalTwinStudioRunner(manifest, lambda _m: None)
-    runner.run_stage("usd_cameras")
+    runner.run_stage("camera_staging")
 
     names = [camera["name"] for camera in manifest.metadata["cameras"]]
     assert "Captured 1" in names and "Captured Walkthrough" in names
-    stage_record = next(record for record in manifest.stages if record.key == "usd_cameras")
+    stage_record = next(record for record in manifest.stages if record.key == "camera_staging")
     assert stage_record.metadata["capturedCount"] == 2
     assert stage_record.metadata["renderPath"] == "Captured Walkthrough"
 
     render_doc = json.loads((usd_dir / "camera_path.json").read_text(encoding="utf-8"))
     assert len(render_doc["camera_path"]) >= 2
     assert len(render_doc["camera_path"][0]["camera_to_world"]) == 16
+
+
+def test_camera_staging_pauses_in_guided_mode_when_no_captures(tmp_path):
+    from vaultwares_studio.pipeline import (
+        DEFAULT_SOURCE_VIDEO,
+        DigitalTwinStudioRunner,
+        StageState,
+        create_job_manifest,
+    )
+
+    manifest = create_job_manifest(source_video=DEFAULT_SOURCE_VIDEO, mode="guided")
+    for record in manifest.stages:
+        if record.key in ("video_intake", "frame_extraction", "reconstruction"):
+            record.state = StageState.COMPLETE.value
+    runner = DigitalTwinStudioRunner(manifest, lambda _m: None)
+    runner.run_stage("camera_staging")
+
+    stage = next(record for record in manifest.stages if record.key == "camera_staging")
+    assert stage.state == StageState.NEEDS_USER_INPUT.value
+    assert stage.metadata["pausedForUserInput"] is True
+    # Re-running with the metadata flag set advances to COMPLETE even without
+    # captures — the user re-ran to accept the defaults.
+    runner.run_stage("camera_staging")
+    assert stage.state == StageState.COMPLETE.value
+
+
+def test_camera_staging_does_not_pause_outside_guided_mode():
+    from vaultwares_studio.pipeline import (
+        DEFAULT_SOURCE_VIDEO,
+        DigitalTwinStudioRunner,
+        StageState,
+        create_job_manifest,
+    )
+
+    manifest = create_job_manifest(source_video=DEFAULT_SOURCE_VIDEO, mode="batch")
+    for record in manifest.stages:
+        if record.key in ("video_intake", "frame_extraction", "reconstruction"):
+            record.state = StageState.COMPLETE.value
+    runner = DigitalTwinStudioRunner(manifest, lambda _m: None)
+    runner.run_stage("camera_staging")
+    stage = next(record for record in manifest.stages if record.key == "camera_staging")
+    assert stage.state == StageState.COMPLETE.value
+
+
+def test_legacy_usd_cameras_key_migrates_on_load(tmp_path):
+    from vaultwares_studio.pipeline import JobManifest
+
+    payload = {
+        "job_id": "legacy-job",
+        "source_video": "x.mp4",
+        "output_dir": str(tmp_path),
+        "execution_profile": "Test",
+        "mode": "guided",
+        "state": "queued",
+        "current_stage_key": "usd_cameras",
+        "created_at": "2026-01-01T00:00:00Z",
+        "updated_at": "2026-01-01T00:00:00Z",
+        "schema_version": 2,
+        "stages": [
+            {"key": "usd_cameras", "title": "USD + Cameras", "description": "legacy", "state": "queued"},
+        ],
+    }
+    manifest = JobManifest.from_dict(payload)
+    assert manifest.current_stage_key == "camera_staging"
+    assert [stage.key for stage in manifest.stages] == ["camera_staging"]

@@ -59,10 +59,14 @@ PRESETS: dict[str, QualityPreset] = {
         key="standard",
         label="Standard",
         iterations=15_000,
-        downscale_factor=2,
+        # No training downscale — splatfacto sees the full-res images so the
+        # output gaussians keep the detail SfM already extracted at full res.
+        # Yes, this 4xes training pixels vs the old 2x downscale; the runtime
+        # bump (35 -> 60 min) is worth a sharper final splat for any demo.
+        downscale_factor=1,
         gaussian_cap=500_000,
         flavor="l4x1",
-        est_minutes=35,
+        est_minutes=60,
         extra_train_args=("--pipeline.model.cull-alpha-thresh", "0.05"),
     ),
     "high": QualityPreset(

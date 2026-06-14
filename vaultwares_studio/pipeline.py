@@ -141,6 +141,15 @@ class JobManifest:
         default_placements = {
             definition.key: definition.default_placement for definition in STAGE_DEFINITIONS
         }
+        # Stage rename usd_cameras -> camera_staging (June 2026). Migrate
+        # in-place so existing job manifests open without manual editing.
+        _LEGACY_KEY_REMAP = {"usd_cameras": "camera_staging"}
+        for stage in payload.get("stages", []):
+            stage["key"] = _LEGACY_KEY_REMAP.get(stage.get("key"), stage.get("key"))
+        if "current_stage_key" in payload:
+            payload["current_stage_key"] = _LEGACY_KEY_REMAP.get(
+                payload["current_stage_key"], payload["current_stage_key"]
+            )
         stages = [
             StageRecord(
                 key=stage["key"],
@@ -209,9 +218,9 @@ STAGE_DEFINITIONS = [
         default_placement="remote",
     ),
     StageDefinition(
-        "usd_cameras",
-        "USD + Cameras",
-        "Compose the USD stage and generate preset plus prompt-directed cameras.",
+        "camera_staging",
+        "Camera Staging",
+        "Compose the USD stage and stage preset, prompt-directed, and captured cameras.",
     ),
     StageDefinition(
         "cosmos_output",
@@ -422,6 +431,7 @@ class DigitalTwinStudioRunner:
         self.recon_stage_path = self.recon_dir / "cloud.usda"
         self.recon_ply_path = self.recon_dir / "cloud.ply"
         self.recon_preview_ply_path = self.recon_dir / "cloud_preview.ply"
+        self.recon_splat_path = self.recon_dir / "cloud.splat"
         self.usd_stage_path = self.usd_dir / "digital_twin_scene.usda"
         self.camera_plan_path = self.usd_dir / "camera_plan.json"
         self.camera_render_path = self.usd_dir / "camera_path.json"
@@ -439,7 +449,7 @@ class DigitalTwinStudioRunner:
             "video_intake": self._run_video_intake,
             "frame_extraction": self._run_frame_extraction,
             "reconstruction": self._run_reconstruction,
-            "usd_cameras": self._run_usd_cameras,
+            "camera_staging": self._run_camera_staging,
             "cosmos_output": self._run_cosmos_output,
         }
         if not stage_dependencies_complete(self.manifest, stage_key):
@@ -452,7 +462,13 @@ class DigitalTwinStudioRunner:
         self._transition(stage, StageState.RUNNING, f"Running {stage.title}")
         try:
             handlers[stage_key](stage)
-            self._transition(stage, StageState.COMPLETE, stage.message or f"{stage.title} complete.")
+            # A handler that explicitly set its own terminal state (e.g.
+            # NEEDS_USER_INPUT) keeps it; only auto-complete when the handler
+            # finished without taking a side path.
+            if stage.state == StageState.RUNNING.value:
+                self._transition(stage, StageState.COMPLETE, stage.message or f"{stage.title} complete.")
+            else:
+                save_job_manifest(self.manifest)
         except Exception as exc:  # noqa: BLE001
             self.manifest.state = StageState.FAILED.value
             self._transition(stage, StageState.FAILED, str(exc))
@@ -636,6 +652,11 @@ class DigitalTwinStudioRunner:
             self._write_placeholder_ply()
             degraded = True
 
+        if not degraded and self.recon_preview_ply_path.exists():
+            self._gravity_align(stage)
+        if not degraded and self.recon_ply_path.exists():
+            self._write_packed_splat(stage)
+
         stage.metadata["degraded"] = degraded
         stage.metadata["preset"] = preset.key
         stage.message = (
@@ -675,6 +696,13 @@ class DigitalTwinStudioRunner:
         export_dir.mkdir(parents=True, exist_ok=True)
         splat_path = export_dir / "splat.ply"
         summary_path = self.recon_dir / "summary.json"
+        # Force the worker bundle into expected_outputs so a missing render
+        # bundle fails the reconstruction stage NOW instead of silently
+        # falling back to a slideshow at cosmos_output time. _run_remote_render
+        # checks both files at reconstruction/remote_out/.
+        remote_out_dir = self.recon_dir / "remote_out"
+        bundle_model = remote_out_dir / "model.zip"
+        bundle_processed = remote_out_dir / "processed_min.zip"
         ctx = StageContext(
             job_dir=self.root,
             job_id=self.manifest.job_id,
@@ -684,7 +712,13 @@ class DigitalTwinStudioRunner:
                 "image_has_hub": True,
                 "flavor": preset.flavor,
                 "est_minutes": preset.est_minutes,
-                "timeout_seconds": int(max(1800, preset.est_minutes * 60 * 3)),
+                # Headroom for COLMAP non-determinism: when sequential matching
+                # draws a degenerate init pair, retry_mapper either recovers in
+                # ~2 min OR falls through to exhaustive matching, which adds
+                # 25-40 min on top of the baseline. 6x est gives a job that
+                # finishes in ~10-15 min on the happy path and still has room
+                # for the exhaustive fallback.
+                "timeout_seconds": int(max(3600, preset.est_minutes * 60 * 6)),
                 "command": [
                     "python", "/opt/vw/recon_entrypoint.py",
                     "--downscale", str(preset.downscale_factor),
@@ -693,7 +727,7 @@ class DigitalTwinStudioRunner:
                 ],
             },
             inputs=[frames_zip],
-            expected_outputs=[splat_path, summary_path],
+            expected_outputs=[splat_path, summary_path, bundle_model, bundle_processed],
             log=self.log,
             cancel=self.cancel_token,
         )
@@ -756,7 +790,11 @@ class DigitalTwinStudioRunner:
                 raise
             return None
 
-    def _run_usd_cameras(self, stage: StageRecord) -> None:
+    def _run_camera_staging(self, stage: StageRecord) -> None:
+        # Read the pause flag BEFORE any handler logic touches stage.metadata;
+        # the metadata dict is replaced wholesale further down, which would
+        # wipe the flag and trap re-runs in a permanent NEEDS_USER_INPUT loop.
+        already_paused = bool(stage.metadata.get("pausedForUserInput"))
         self.usd_dir.mkdir(parents=True, exist_ok=True)
         self.cameras_dir.mkdir(parents=True, exist_ok=True)
         stage_path = Usd.Stage.CreateNew(str(self.usd_stage_path))
@@ -820,6 +858,23 @@ class DigitalTwinStudioRunner:
             f"USD stage composed with {len(entities)} cameras "
             f"({len(captured)} captured); render path: {path_entity.name}."
         )
+
+        # Guided mode pauses once when no user captures exist so the user can
+        # author poses in the viewport before the path renders downstream.
+        # Re-running with the metadata flag set finalises (whether captures
+        # were added or the user chose to accept the presets as-is).
+        if self.manifest.mode == "guided" and len(captured) == 0 and not already_paused:
+            stage.metadata["pausedForUserInput"] = True
+            stage.message = (
+                f"Generated {len(entities)} default cameras. Capture poses in "
+                "the viewport to add more, then re-run this step. Re-run as-is "
+                "to accept the defaults."
+            )
+            stage.state = StageState.NEEDS_USER_INPUT.value
+            self.log(stage.message)
+            # Skip artifact registration: the USD stage is provisional until
+            # the user finalises on the next invocation.
+            return
         self._add_artifact(stage, "USD Stage", "usd", self.usd_stage_path, "Composed digital twin stage.")
         self._add_artifact(stage, "Camera Plan", "json", self.camera_plan_path, "Cameras and paths.")
         self._add_artifact(stage, "Render Camera Path", "json", self.camera_render_path, "ns-render camera path.")
@@ -839,35 +894,73 @@ class DigitalTwinStudioRunner:
         except Exception:  # noqa: BLE001 - placeholder scenes have no preview
             return [0.0, 0.0, 0.0]
 
+    def _gravity_align(self, stage: StageRecord) -> None:
+        """Rotate cloud.ply + cloud_preview.ply so world +Y is up.
+
+        Skips silently if the strict-mode build flag is off and the rotation
+        fails (alignment is a polish step, not a correctness gate).
+        """
+        from .gravity_align import align_cloud
+
+        summary_path = self.recon_dir / "summary.json"
+        try:
+            result = align_cloud(
+                self.recon_ply_path,
+                self.recon_preview_ply_path,
+                summary_path=summary_path,
+                captured_cameras_path=self.usd_dir / "captured_cameras.json",
+            )
+        except Exception as exc:  # noqa: BLE001 - alignment is best-effort
+            if self.strict_mode:
+                raise
+            self.log(f"Gravity alignment skipped: {exc}")
+            return
+        if result is None:
+            self.log("Gravity alignment skipped (cloud already aligned).")
+            stage.metadata["gravity_aligned"] = True
+            return
+        stage.metadata["gravity_aligned"] = True
+        stage.metadata["alignment_tilt_degrees"] = round(result.angle_from_y_degrees, 2)
+        self.log(
+            "Gravity-aligned cloud: rotated "
+            f"{result.angle_from_y_degrees:.1f}° to bring scene up to +Y "
+            f"(skewness {result.skewness:+.2f}, flipped={result.flipped})."
+        )
+
+    def _write_packed_splat(self, stage: StageRecord) -> None:
+        """Encode the splat PLY into the compact .splat format for fast loads.
+
+        ~7x smaller than the equivalent PLY (32 bytes per gaussian vs the full
+        ply row), and the viewer skips the PLY header parse entirely. Best
+        effort: skips silently outside strict mode if the input isn't a 3DGS
+        PLY (placeholder paths) or anything else goes sideways.
+        """
+        from .splat_io import is_gaussian_ply
+        from .splat_packed import ply_to_splat
+
+        if not is_gaussian_ply(self.recon_ply_path):
+            return
+        try:
+            size = ply_to_splat(self.recon_ply_path, self.recon_splat_path)
+        except Exception as exc:  # noqa: BLE001 - packing is opportunistic
+            if self.strict_mode:
+                raise
+            self.log(f"Packed .splat skipped: {exc}")
+            return
+        stage.metadata["packedSplatBytes"] = size
+        self.log(f"Packed .splat written: {size // 1_000_000} MB.")
+
     def _default_orbit_path(self, center: list[float], seconds: float = 12.0) -> CameraEntity:
-        import math
+        from .walk_patterns import SceneBounds, bounds_from_preview_ply, orbit
 
         try:
-            import numpy as np
-            from plyfile import PlyData
-
-            vertex = PlyData.read(str(self.recon_preview_ply_path))["vertex"]
-            points = np.stack([vertex["x"], vertex["y"], vertex["z"]], axis=1)
-            low, high = np.percentile(points, [5, 95], axis=0)
-            radius = float(np.linalg.norm(high - low) / 2) or 2.0
-        except Exception:  # noqa: BLE001
-            radius = 2.0
-        keyframes = []
-        stops = 9  # closed loop: last == first heading
-        for index in range(stops):
-            angle = 2 * math.pi * index / (stops - 1)
-            keyframes.append(
-                CameraKeyframe(
-                    t=seconds * index / (stops - 1),
-                    position=[
-                        center[0] + radius * 0.9 * math.cos(angle),
-                        center[1] + radius * 0.35,
-                        center[2] + radius * 0.9 * math.sin(angle),
-                    ],
-                    look_at=list(center),
-                )
-            )
-        return CameraEntity(name="Scene Orbit", source="preset", keyframes=keyframes)
+            bounds = bounds_from_preview_ply(self.recon_preview_ply_path)
+            # Honour the caller's centroid: it already does the same percentile
+            # math but may incorporate other heuristics.
+            bounds = SceneBounds(center=tuple(float(value) for value in center), radius=bounds.radius)
+        except Exception:  # noqa: BLE001 - placeholder scenes have no preview cloud
+            bounds = SceneBounds(center=tuple(float(value) for value in center), radius=2.0)
+        return orbit(bounds, seconds=seconds, name="Scene Orbit")
 
     def _run_cosmos_output(self, stage: StageRecord) -> None:
         self.cosmos_dir.mkdir(parents=True, exist_ok=True)
