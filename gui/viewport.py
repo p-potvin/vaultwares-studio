@@ -237,6 +237,7 @@ if WEBENGINE_AVAILABLE:
         camera_captured = Signal(dict)
         viewer_ready = Signal()
         js_message = Signal(str)
+        viewer_flip_changed = Signal(bool)
 
         @Slot(str)
         def cameraCaptured(self, payload: str) -> None:  # noqa: N802
@@ -252,6 +253,10 @@ if WEBENGINE_AVAILABLE:
         @Slot(str)
         def jsLog(self, message: str) -> None:  # noqa: N802
             self.js_message.emit(message)
+
+        @Slot(bool)
+        def viewerFlipChanged(self, flipped: bool) -> None:  # noqa: N802
+            self.viewer_flip_changed.emit(flipped)
 
 
 class ViewportTab(QFrame):
@@ -271,6 +276,8 @@ class ViewportTab(QFrame):
             value if (value := base_translate(key)) != key else _DEFAULT_STRINGS.get(key, key)
         )
         self._job_dir: Path | None = None
+        # (path_key, SceneBounds) — see _get_bounds_cached.
+        self._bounds_cache: tuple | None = None
 
         layout = QVBoxLayout(self)
         layout.setContentsMargins(10, 10, 10, 10)
@@ -423,6 +430,7 @@ class ViewportTab(QFrame):
         self._bridge.camera_captured.connect(self._on_camera_captured)
         self._bridge.viewer_ready.connect(lambda: self.capture_btn.setEnabled(True))
         self._bridge.js_message.connect(self._set_status)
+        self._bridge.viewer_flip_changed.connect(self._on_viewer_flip_changed)
         self.reload_btn.clicked.connect(self.reload_scene)
         self.capture_btn.clicked.connect(
             lambda: self.web_view.page().runJavaScript("window.captureCamera();")
@@ -433,10 +441,35 @@ class ViewportTab(QFrame):
     def set_job(self, job_dir: Path | str) -> None:
         """Point the viewport at a job; loads its reconstruction if present."""
         self._job_dir = Path(job_dir)
+        # Invalidate the bounds cache so a new job re-reads its preview PLY.
+        # The cache itself is keyed on (path, mtime) so this is belt-and-braces.
+        self._bounds_cache = None
         if self.web_view is not None:
             self._server.job_root = self._job_dir
             self._refresh_cameras()
         self.reload_scene()
+
+    def _get_bounds_cached(self):
+        """Return cached SceneBounds for the current job, re-reading on stale.
+
+        bounds_from_preview_ply opens a ~200K-point PLY and runs np.percentile —
+        hundreds of ms on every click of Apply+Preview Pattern, which the user
+        feels as a stutter. Cache invalidates on path or mtime change so editing
+        the preview cloud during a session still re-reads.
+        """
+        from vaultwares_studio.walk_patterns import bounds_from_preview_ply
+
+        if self._job_dir is None:
+            return None
+        preview_ply = self._job_dir / "reconstruction" / "cloud_preview.ply"
+        if not preview_ply.exists():
+            return None
+        key = (str(preview_ply), preview_ply.stat().st_mtime_ns)
+        if self._bounds_cache is not None and self._bounds_cache[0] == key:
+            return self._bounds_cache[1]
+        bounds = bounds_from_preview_ply(preview_ply)
+        self._bounds_cache = (key, bounds)
+        return bounds
 
     # -- captured-cameras panel -------------------------------------------------
 
@@ -509,15 +542,14 @@ class ViewportTab(QFrame):
         if self._job_dir is None or self.web_view is None:
             return
         from vaultwares_studio.camera_paths import sample_path, to_nerfstudio_camera_path
-        from vaultwares_studio.walk_patterns import bounds_from_preview_ply, build_pattern
+        from vaultwares_studio.walk_patterns import build_pattern
 
         name = self.pattern_select.currentText()
-        preview_ply = self._job_dir / "reconstruction" / "cloud_preview.ply"
-        if not preview_ply.exists():
+        bounds = self._get_bounds_cached()
+        if bounds is None:
             self._set_status(self._t("viewport_pattern_no_preview"))
             return
         try:
-            bounds = bounds_from_preview_ply(preview_ply)
             params: dict = {}
             if name == "retrace_steps":
                 # Look for the Nerfstudio dataparser transforms shipped with the
@@ -586,12 +618,45 @@ class ViewportTab(QFrame):
             frame = self._scene_framing()
             if frame:
                 query.append(frame)
+            # Per-job sticky orientation: gravity_align's PCA-skewness heuristic
+            # occasionally guesses up-down backwards (outdoor scenes with sparse
+            # foliage above can read like the ground). Persisting the user's
+            # Flip Up click means they only fix it once per job.
+            if self._load_viewer_state().get("flipped"):
+                query.append("flip=1")
             url.setQuery("&".join(query))
             self._set_status(self._t("viewport_loading"))
         else:
             self._set_status(self._t("viewport_no_scene"))
         self.capture_btn.setEnabled(False)
         self.web_view.load(url)
+
+    @property
+    def _viewer_state_path(self) -> Path | None:
+        return self._job_dir / "usd" / "viewer_state.json" if self._job_dir else None
+
+    def _load_viewer_state(self) -> dict:
+        path = self._viewer_state_path
+        if path is None or not path.exists():
+            return {}
+        try:
+            return json.loads(path.read_text(encoding="utf-8"))
+        except json.JSONDecodeError:
+            return {}
+
+    def _save_viewer_state(self, state: dict) -> None:
+        path = self._viewer_state_path
+        if path is None:
+            return
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps(state, indent=2), encoding="utf-8")
+
+    def _on_viewer_flip_changed(self, flipped: bool) -> None:
+        state = self._load_viewer_state()
+        if state.get("flipped") == flipped:
+            return
+        state["flipped"] = flipped
+        self._save_viewer_state(state)
 
     def _scene_framing(self) -> str:
         """Centroid + radius from the preview cloud so the camera starts framed."""

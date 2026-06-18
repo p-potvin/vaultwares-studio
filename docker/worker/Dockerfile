@@ -12,6 +12,25 @@ FROM ghcr.io/nerfstudio-project/nerfstudio:latest
 
 USER root
 ENV PYTHONUNBUFFERED=1
+# Drop a sitecustomize.py that turns on TF32 matmul before any user code
+# starts — PyTorch doesn't have an env var for this, only the Python call.
+# L4 is Ampere; TF32 buys ~2x FP32 matmul throughput with negligible quality
+# loss for splatfacto. This fires for every Python process in the container.
+RUN SITEPKG=$(python3 -c "import site; print(site.getsitepackages()[0])") \
+    && printf '%s\n' \
+        'try:' \
+        '    import torch' \
+        "    torch.set_float32_matmul_precision('high')" \
+        'except Exception:' \
+        '    pass' \
+        > "$SITEPKG/sitecustomize.py"
+# CuDNN's runtime-compiled kernel selection wants libnvrtc.so. Without it,
+# splatfacto.py applies a workaround that picks slower kernel paths. The
+# matching CUDA version comes from the base nerfstudio image; we install the
+# python distribution package that ships the shared object.
+RUN python3 -m pip install --no-cache-dir nvidia-cuda-nvrtc-cu12 \
+    || pip3 install --no-cache-dir nvidia-cuda-nvrtc-cu12 \
+    || echo "[Dockerfile] nvrtc package install skipped (already present or unavailable)"
 
 # The nerfstudio image exposes python3 but neither `pip` nor a bare `python`
 # on PATH; job commands use `python`, so alias it.

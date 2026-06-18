@@ -8,6 +8,12 @@ import * as GaussianSplats3D from './vendor/gaussian-splats-3d.module.js';
 const statusEl = document.getElementById('status');
 let bridge = null;
 let viewer = null;
+// Mutable world-up reference shared between flipCameraUp and the FPS / WASD
+// movement code. Starts as +Y; flipCameraUp inverts it so that after the user
+// rights the scene, FPS yaw axis and the WASD right-vector cross product both
+// flip together — otherwise "right" ends up pointing left, which is what
+// "L/R inverted after Flip Up" was.
+const worldUp = new THREE.Vector3(0, 1, 0);
 
 function setStatus(message) {
   statusEl.textContent = message;
@@ -272,13 +278,24 @@ window.snapToView = function snapToView(viewName) {
 // Roll the camera 180 degrees around its forward axis. Useful when the orbit
 // has somehow ended up upside-down (rare, but the pole clamp doesn't catch
 // every weird state) — gives a one-click "right myself" button.
-window.flipCameraUp = function flipCameraUp() {
+// Tracks the current flip state and notifies Python whenever it changes so
+// the choice survives a viewer reload. Direct calls (e.g. the auto-flip on
+// load) should pass {silent: true} to skip the bridge notification.
+let isFlipped = false;
+window.flipCameraUp = function flipCameraUp(options) {
   if (!viewer) return;
   const camera = viewer.camera;
   camera.up.set(-camera.up.x, -camera.up.y, -camera.up.z);
+  // Flip the FPS / WASD up reference too, otherwise after righting the scene
+  // the right-vector cross-product flips sign and A/D feel inverted.
+  worldUp.set(-worldUp.x, -worldUp.y, -worldUp.z);
   const target = viewer.controls ? viewer.controls.target : { x: 0, y: 0, z: 0 };
   camera.lookAt(target.x, target.y, target.z);
   if (viewer.controls) viewer.controls.update();
+  isFlipped = !isFlipped;
+  if (!(options && options.silent) && bridge && bridge.viewerFlipChanged) {
+    bridge.viewerFlipChanged(isFlipped);
+  }
   setStatus('Camera up flipped.');
 };
 
@@ -343,12 +360,30 @@ async function main() {
       viewer.controls.minPolarAngle = 0.05;
       viewer.controls.maxPolarAngle = Math.PI - 0.05;
       // OrbitControls defaults feel hot inside QWebEngineView — DPI scaling
-      // amplifies mouse deltas. Halving rotate/pan/zoom speed brings the
-      // feel closer to a desktop three.js viewer.
-      viewer.controls.rotateSpeed = 0.5;
+      // amplifies mouse deltas. The free-look path uses its own (lower)
+      // sensitivity; left-drag orbit stays slow to match that calmer feel.
+      viewer.controls.rotateSpeed = 0.25;
       viewer.controls.panSpeed = 0.5;
       viewer.controls.zoomSpeed = 0.6;
+      // Damping stays ON (enableDamping=false breaks WASD walking by changing
+      // how OrbitControls.update() handles externally-mutated camera state),
+      // but the factor is bumped up so the post-release glide decays in a
+      // few frames instead of half a second. 0.05 was the default → noticeable
+      // overshoot; 0.3 is tight without feeling jerky.
+      viewer.controls.dampingFactor = 0.3;
+      // Enforce world +Y as camera up at load. Gravity alignment puts the
+      // scene's up axis on world +Y, but GaussianSplats3D's auto-framed
+      // camera occasionally lands with up=(0,-1,0) — which is why the view
+      // started upside down. Setting it once here means the user doesn't
+      // need to hit Flip Up on every load.
+      viewer.camera.up.set(0, 1, 0);
       viewer.controls.update();
+    }
+    // Per-job sticky flip: Python passes flip=1 when the user previously hit
+    // Flip Up on this job, so the orientation persists across reloads. Silent
+    // call avoids re-notifying Python (we already know the persisted state).
+    if (params.get('flip') === '1') {
+      window.flipCameraUp({ silent: true });
     }
     setupAxisGizmo(() => viewer.camera, () => viewer.controls);
     // Infinite zoom: orbit controls asymptote at the target and feel like a
@@ -413,6 +448,121 @@ async function main() {
     });
     window.addEventListener('blur', () => heldKeys.clear());
 
+    // Free-look mode: hold right-mouse (or both buttons) to pivot the camera
+    // in place — yaw + pitch, no translation, cursor stays visible (no pointer
+    // lock). This mimics how a person turns their head: the body stays
+    // planted, the eyes sweep around. WASD continues to walk in this mode, so
+    // free-look + WASD together is the practical "first-person walking"
+    // experience; right-click alone is the precise-framing tool. Pointer lock
+    // turned out to be the wrong abstraction for precise framing — hiding the
+    // cursor made it hard to know what you were pointing at.
+    //
+    // Math: snapshot the camera's quaternion at entry as `lookBaseQuat`, then
+    // accumulate scalar yaw + pitch deltas. Final orientation per frame is
+    // qPitch * qYaw * lookBaseQuat, where qYaw is around worldUp and qPitch
+    // is around the right axis after yaw. Textbook roll-free FPS camera; the
+    // pitch scalar is trivially clamped to ±89°.
+    let lookMode = false;
+    let lookYaw = 0;
+    let lookPitch = 0;
+    let leftDown = false;
+    let rightDown = false;
+    const LOOK_TARGET_DISTANCE = 3.0;
+    const PITCH_LIMIT = Math.PI / 2 - 0.02; // ~88.8 degrees
+    const lookBaseQuat = new THREE.Quaternion();
+    const _vec = new THREE.Vector3();
+    const _qYaw = new THREE.Quaternion();
+    const _qPitch = new THREE.Quaternion();
+    const _baseRight = new THREE.Vector3();
+    const _rightAfterYaw = new THREE.Vector3();
+
+    function applyLookOrientation() {
+      _qYaw.setFromAxisAngle(worldUp, lookYaw);
+      // The pitch axis is the base-camera's local +X transformed by qYaw —
+      // i.e. the right axis the camera would have after yaw alone. Always
+      // perpendicular to worldUp by construction, so pitch never induces roll.
+      _baseRight.set(1, 0, 0).applyQuaternion(lookBaseQuat);
+      _rightAfterYaw.copy(_baseRight).applyQuaternion(_qYaw);
+      _qPitch.setFromAxisAngle(_rightAfterYaw, lookPitch);
+      viewer.camera.quaternion
+        .copy(lookBaseQuat)
+        .premultiply(_qYaw)
+        .premultiply(_qPitch);
+      // Park the orbit target on the camera's forward ray so capture poses
+      // and post-free-look orbit drag both have a coherent pivot in view.
+      _vec.set(0, 0, -1).applyQuaternion(viewer.camera.quaternion);
+      viewer.controls.target
+        .copy(viewer.camera.position)
+        .addScaledVector(_vec, LOOK_TARGET_DISTANCE);
+    }
+
+    function enterLookMode() {
+      lookBaseQuat.copy(viewer.camera.quaternion);
+      lookYaw = 0;
+      lookPitch = 0;
+      lookMode = true;
+      if (viewer.controls) viewer.controls.enabled = false;
+      setStatus('Free-look — drag to pivot in place, WASD to walk, release right-mouse to exit.');
+    }
+
+    function exitLookMode() {
+      lookMode = false;
+      if (viewer.controls) viewer.controls.enabled = true;
+      setStatus('Scene loaded — right-click+drag for free-look, drag to orbit, WASD to fly, scroll to zoom.');
+    }
+
+    if (rendererCanvas) {
+      // Suppress the native right-click menu so it doesn't fight free-look.
+      // The contextmenu event fires on right-mouseUP, and in free-look the
+      // cursor often wanders off the canvas before release — so the menu
+      // would open on whatever document element ended up under the pointer.
+      // Binding the listener at document level catches all of those.
+      document.addEventListener('contextmenu', (event) => event.preventDefault());
+
+      rendererCanvas.addEventListener('mousedown', (event) => {
+        if (event.button === 0) leftDown = true;
+        if (event.button === 2) rightDown = true;
+        // Right-mouse-down (alone or with left) → enter free-look. Stop
+        // propagation so OrbitControls' own right-button binding (pan) never
+        // fires — it would fight our rotation and leave the target adrift.
+        if (event.button === 2 && !lookMode) {
+          event.preventDefault();
+          event.stopPropagation();
+          enterLookMode();
+        }
+      });
+
+      window.addEventListener('mouseup', (event) => {
+        if (event.button === 0) leftDown = false;
+        if (event.button === 2) rightDown = false;
+        // Exit free-look when right releases (the canonical binding). Both-
+        // buttons callers exit on either release, which matches the original
+        // both-buttons gesture and avoids stuck-in-look after they let go.
+        if (lookMode && !rightDown) {
+          exitLookMode();
+        }
+      });
+
+      document.addEventListener('mousemove', (event) => {
+        if (!lookMode) return;
+        // Sensitivity tuned for QtWebEngine's DPI-amplified deltas; halve
+        // for a slower feel or double for snappier.
+        const sens = 0.0022;
+        lookYaw -= event.movementX * sens;
+        lookPitch -= event.movementY * sens;
+        lookPitch = Math.max(-PITCH_LIMIT, Math.min(PITCH_LIMIT, lookPitch));
+        applyLookOrientation();
+      });
+
+      // Cancel free-look if the canvas loses focus mid-drag (alt-tab, etc.)
+      // so the next pointerdown starts clean.
+      window.addEventListener('blur', () => {
+        leftDown = false;
+        rightDown = false;
+        if (lookMode) exitLookMode();
+      });
+    }
+
     let lastFrameMs = performance.now();
     function flyTick(now) {
       const dt = Math.min(0.1, (now - lastFrameMs) / 1000);
@@ -421,11 +571,22 @@ async function main() {
       if (!viewer.controls || heldKeys.size === 0) return;
       const camera = viewer.camera;
       const target = viewer.controls.target;
-      const forward = new THREE.Vector3().subVectors(target, camera.position);
-      const distance = forward.length();
-      if (distance < 1e-4) return;
-      forward.normalize();
-      const right = new THREE.Vector3().crossVectors(forward, camera.up).normalize();
+      let forward;
+      let distance;
+      if (lookMode) {
+        // In free-look mode movement is along the camera's HORIZONTAL forward
+        // so looking down doesn't slow walking. Project camera forward onto
+        // the plane perpendicular to worldUp; QE handles vertical separately.
+        forward = new THREE.Vector3(0, 0, -1).applyQuaternion(camera.quaternion);
+        forward.addScaledVector(worldUp, -forward.dot(worldUp)).normalize();
+        distance = LOOK_TARGET_DISTANCE;
+      } else {
+        forward = new THREE.Vector3().subVectors(target, camera.position);
+        distance = forward.length();
+        if (distance < 1e-4) return;
+        forward.normalize();
+      }
+      const right = new THREE.Vector3().crossVectors(forward, worldUp).normalize();
       // Scale move speed with the orbit distance so the same key feel works at
       // both far and close framings. The multipliers were tuned down (0.6 ->
       // 0.35, floor 0.4 -> 0.25) after user feedback that fly was too hot;
@@ -437,8 +598,10 @@ async function main() {
       if (heldKeys.has('s')) delta.addScaledVector(forward, -speed);
       if (heldKeys.has('d')) delta.addScaledVector(right, speed);
       if (heldKeys.has('a')) delta.addScaledVector(right, -speed);
-      if (heldKeys.has('e')) delta.y += speed;
-      if (heldKeys.has('q')) delta.y -= speed;
+      // E/Q follow worldUp so they always feel "up/down" in the user's frame,
+      // even after Flip Up — when worldUp is (0,-1,0) pressing E goes visually up.
+      if (heldKeys.has('e')) delta.addScaledVector(worldUp, speed);
+      if (heldKeys.has('q')) delta.addScaledVector(worldUp, -speed);
       if (delta.lengthSq() === 0) return;
       camera.position.add(delta);
       target.add(delta);
@@ -446,7 +609,7 @@ async function main() {
     }
     requestAnimationFrame(flyTick);
 
-    setStatus('Scene loaded — drag to orbit, WASD to fly, Shift to sprint, scroll to zoom.');
+    setStatus('Scene loaded — right-click+drag for free-look, drag to orbit, WASD to fly, scroll to zoom.');
   } catch (error) {
     setStatus(`Failed to load scene: ${error.message || error}`);
     console.error(error);

@@ -17,6 +17,13 @@ from .hf_jobs import (
     set_hf_token,
 )
 from .local import LocalStageRunner
+from .vast_ai import (
+    VastAiConfig,
+    VastAiStageRunner,
+    find_best_offer,
+    get_vast_api_key,
+    set_vast_api_key,
+)
 
 __all__ = [
     "CancelToken",
@@ -30,8 +37,13 @@ __all__ = [
     "StageContext",
     "StageResult",
     "StageRunner",
+    "VastAiConfig",
+    "VastAiStageRunner",
     "estimate_cost",
+    "find_best_offer",
     "get_hf_token",
+    "get_vast_api_key",
     "run_echo_smoke_test",
     "set_hf_token",
+    "set_vast_api_key",
 ]

@@ -373,8 +373,8 @@ def stage_dependencies_complete(manifest: JobManifest, stage_key: str) -> bool:
 
 # Walkthrough footage wants ~300 frames for robust SfM (nerfstudio's own
 # video target); we extract at ~2x that and keep the sharpest per bucket.
-FRAME_KEEP_TARGET = 280
-FRAME_EXTRACT_TARGET = 560
+FRAME_KEEP_TARGET = 500
+FRAME_EXTRACT_TARGET = 1000
 FRAME_PATTERNS = ("*.jpg", "*.png")
 
 
@@ -578,6 +578,35 @@ class DigitalTwinStudioRunner:
                 self.log(f"Kept {kept_count}/{extracted_count} sharpest frames (motion-blur filter).")
             except ImportError:
                 self.log("OpenCV unavailable; skipping blur-aware frame selection.")
+        base_frames_zip = self.manifest.metadata.get("refine_base_frames_zip")
+        # In refine mode the base set uses names like frame_00001.jpg (matching
+        # the base colmap_database). Rename the primary video's just-extracted
+        # frames with a clip0_ prefix so they don't collide, and use clip<N+1>_
+        # for the extras. In non-refine runs the primary keeps its historical
+        # frame_*.jpg name and extras get extra<N>_ as before.
+        extras_prefix_base = "clip" if base_frames_zip else "extra"
+        if base_frames_zip:
+            import shutil
+
+            for source in list_frames(self.frames_dir):
+                if not source.name.startswith("clip"):
+                    shutil.move(str(source), str(self.frames_dir / f"clip0_{source.name}"))
+        # Multi-video runs: extract each additional clip with the same fps +
+        # blur-prune budget the primary got. Per-video pruning prevents a long
+        # clip from monopolising the budget (a 350s cloudy + 130s sunny pair
+        # would otherwise be 73% cloudy if the prune ran on the combined set).
+        for index, extra_video in enumerate(self.manifest.metadata.get("extra_videos", []) or []):
+            offset = 1 if base_frames_zip else 0
+            self._extract_extra_video(
+                extra_video,
+                prefix=f"{extras_prefix_base}{index + offset}_",
+                ffmpeg=ffmpeg,
+            )
+        # Refine mode: merge the base job's frames LAST. Original filenames are
+        # preserved (see _merge_refine_base_frames) so the base colmap_database
+        # lookups still hit.
+        if base_frames_zip:
+            self._merge_refine_base_frames(Path(base_frames_zip))
         frame_paths = list_frames(self.frames_dir)
         if not frame_paths:
             raise RuntimeError("No frames were extracted.")
@@ -597,6 +626,92 @@ class DigitalTwinStudioRunner:
         self._add_artifact(stage, "Frames Manifest", "json", preview_manifest, "Frame extraction summary.")
         for index, frame in enumerate(frame_paths[:3], start=1):
             self._add_artifact(stage, f"Frame Preview {index}", "image", frame, "Sample extracted frame.")
+
+    def _extract_extra_video(self, video_path: str, prefix: str, ffmpeg: str) -> None:
+        """Extract an additional clip into self.frames_dir, prefixed and pruned.
+
+        Each extra clip gets its own temp dir for the ffmpeg dump and its own
+        sharpness pass, so the prune budget is per-video. After pruning, files
+        are moved into self.frames_dir as ``<prefix>frame_NNNNN.jpg``. We try
+        to read duration from ffprobe; on failure (e.g. ffprobe not in PATH)
+        we fall back to the same fps the primary chose.
+        """
+        import shutil
+        import subprocess
+        import tempfile
+
+        video = Path(video_path)
+        if not video.exists():
+            self.log(f"Extra video skipped: {video} does not exist.")
+            return
+        # Duration is opportunistic — compute_extraction_fps handles None.
+        duration: float | None = None
+        try:
+            probe = subprocess.run(
+                ["ffprobe", "-v", "error", "-show_entries", "format=duration",
+                 "-of", "default=noprint_wrappers=1:nokey=1", str(video)],
+                capture_output=True, text=True, timeout=30,
+            )
+            duration = float(probe.stdout.strip()) if probe.returncode == 0 else None
+        except (FileNotFoundError, subprocess.TimeoutExpired, ValueError):
+            pass
+        fps = compute_extraction_fps(duration, target_frames=FRAME_EXTRACT_TARGET)
+        with tempfile.TemporaryDirectory(prefix=f"vw-{prefix.strip('_')}-") as tmpdir:
+            tmp_path = Path(tmpdir)
+            self.log(f"Extracting extra video {video.name} at {fps} fps (duration: {duration or 'unknown'}s)")
+            cmd = [
+                ffmpeg, "-y", "-i", str(video),
+                "-vf", f"fps={fps}", "-q:v", "2",
+                str(tmp_path / "frame_%05d.jpg"),
+            ]
+            self._run_command(cmd, f"Extra-video extraction failed for {video.name}.", timeout_seconds=1800)
+            raw_count = len(list_frames(tmp_path))
+            kept_count = raw_count
+            if raw_count > FRAME_KEEP_TARGET:
+                try:
+                    from .frame_selection import prune_to_sharpest
+
+                    raw_count, kept_count = prune_to_sharpest(tmp_path, FRAME_KEEP_TARGET)
+                except ImportError:
+                    self.log("OpenCV unavailable; skipping blur-aware prune for extra video.")
+            for source in list_frames(tmp_path):
+                shutil.move(str(source), str(self.frames_dir / f"{prefix}{source.name}"))
+            self.log(f"Extra video {video.name}: kept {kept_count}/{raw_count} frames (prefix={prefix}).")
+
+    def _merge_refine_base_frames(self, base_zip: Path) -> None:
+        """Unpack the base job's frames into self.frames_dir with ORIGINAL names.
+
+        The worker's --refine-mode looks up each image in the base
+        colmap_database.db by name to know which features are already cached.
+        Prefixing the base frames would make colmap see them as new images
+        and re-extract features, defeating the point of refine. New-clip
+        frames are prefixed (clip<N>_) on the extraction side instead.
+        """
+        import zipfile
+
+        if not base_zip.exists():
+            self.log(f"Refine: base frames zip not found at {base_zip}; skipping merge.")
+            return
+        merged = 0
+        with zipfile.ZipFile(base_zip) as archive:
+            for info in archive.infolist():
+                if info.is_dir():
+                    continue
+                bare = Path(info.filename).name
+                if not bare:
+                    continue
+                target = self.frames_dir / bare
+                with archive.open(info) as src, open(target, "wb") as dst:
+                    dst.write(src.read())
+                merged += 1
+        new_count = sum(
+            1 for p in list_frames(self.frames_dir)
+            if p.name.startswith("clip")
+        )
+        self.log(
+            f"Refine: merged {merged} base frames into {self.frames_dir.name} "
+            f"(new={new_count}, total={new_count + merged})."
+        )
 
     def _run_reconstruction(self, stage: StageRecord) -> None:
         self.recon_dir.mkdir(parents=True, exist_ok=True)
@@ -703,6 +818,26 @@ class DigitalTwinStudioRunner:
         remote_out_dir = self.recon_dir / "remote_out"
         bundle_model = remote_out_dir / "model.zip"
         bundle_processed = remote_out_dir / "processed_min.zip"
+
+        # Refine mode plumbs the base job's bundle into the worker via the
+        # artifact dataset (no re-upload — the files already live there from
+        # the base run) and asks the worker to skip the standard COLMAP path.
+        refine_from = self.manifest.metadata.get("refine_from_job_id")
+        worker_command = [
+            "python", "/opt/vw/recon_entrypoint.py",
+            "--downscale", str(preset.downscale_factor),
+            "--train-args", _json.dumps(preset.train_args()),
+            "--keep-checkpoint",
+        ]
+        extra_repo_inputs: list[str] = []
+        if refine_from:
+            base_prefix = f"jobs/{refine_from}/reconstruction/out"
+            extra_repo_inputs = [
+                f"{base_prefix}/model.zip",
+                f"{base_prefix}/processed_min.zip",
+            ]
+            worker_command.append("--refine-mode")
+
         ctx = StageContext(
             job_dir=self.root,
             job_id=self.manifest.job_id,
@@ -719,12 +854,8 @@ class DigitalTwinStudioRunner:
                 # finishes in ~10-15 min on the happy path and still has room
                 # for the exhaustive fallback.
                 "timeout_seconds": int(max(3600, preset.est_minutes * 60 * 6)),
-                "command": [
-                    "python", "/opt/vw/recon_entrypoint.py",
-                    "--downscale", str(preset.downscale_factor),
-                    "--train-args", _json.dumps(preset.train_args()),
-                    "--keep-checkpoint",
-                ],
+                "command": worker_command,
+                "extra_repo_inputs": extra_repo_inputs,
             },
             inputs=[frames_zip],
             expected_outputs=[splat_path, summary_path, bundle_model, bundle_processed],

@@ -69,6 +69,29 @@ PRESETS: dict[str, QualityPreset] = {
         est_minutes=60,
         extra_train_args=("--pipeline.model.cull-alpha-thresh", "0.05"),
     ),
+    # Refine an existing splat: launcher passes --refine-from, worker resumes
+    # from the base model.zip checkpoint via ns-train --load-dir, and we only
+    # need enough additional iterations for the new viewpoints to settle into
+    # the existing Gaussian state. 5k is the sweet spot per nerfstudio
+    # community guidance for fine-tune runs; bump to 8k if the refine ends
+    # up under-fit on new views.
+    #
+    # est_minutes was 25 at first — measured ~120 min on the first real run
+    # (1500-frame joint set: ~90 min for feature_extractor + vocab_tree cross-
+    # matching + image_registrator, ~15 min for 5k splatfacto resume iters,
+    # plus IO around the 1 GB base bundle pull). Image-registrator scales
+    # with N, vocab matching scales O(N * K=100). For smaller refines (few
+    # hundred new frames) it'll come in well under that.
+    "refine": QualityPreset(
+        key="refine",
+        label="Refine (resume from base checkpoint)",
+        iterations=5_000,
+        downscale_factor=1,
+        gaussian_cap=500_000,
+        flavor="l4x1",
+        est_minutes=120,
+        extra_train_args=("--pipeline.model.cull-alpha-thresh", "0.05"),
+    ),
     "high": QualityPreset(
         key="high",
         label="High (slow, best quality)",

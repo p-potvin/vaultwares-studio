@@ -90,3 +90,54 @@ def test_vaultflows_workflow_export_shape():
     assert workflow["favorite"] is True
     assert len(workflow["steps"]) == len(manifest.stages)
     assert workflow["steps"][0]["id"] == "video_intake"
+
+
+def test_refine_base_frames_merge(tmp_path):
+    """Refine mode unpacks base frames with ORIGINAL names (not prefixed).
+
+    The worker's --refine-mode looks up each image by name in the base
+    colmap_database.db; prefixing the base would make those lookups miss and
+    force feature re-extraction (defeating the point). New-clip frames are
+    prefixed (clip<N>_) on the extraction side instead.
+    """
+    import zipfile
+
+    from vaultwares_studio.pipeline import DigitalTwinStudioRunner
+
+    base_zip = tmp_path / "_base_frames.zip"
+    with zipfile.ZipFile(base_zip, "w") as archive:
+        for index in range(3):
+            archive.writestr(f"frame_{index:05d}.jpg", b"fake-jpeg-bytes")
+
+    manifest = create_job_manifest(source_video=DEFAULT_SOURCE_VIDEO)
+    runner = DigitalTwinStudioRunner(manifest, lambda _m: None)
+    runner.frames_dir.mkdir(parents=True, exist_ok=True)
+    # Simulate new frames already prefixed clip0_ (as the refine path does).
+    (runner.frames_dir / "clip0_frame_00001.jpg").write_bytes(b"new1")
+    (runner.frames_dir / "clip0_frame_00002.jpg").write_bytes(b"new2")
+
+    runner._merge_refine_base_frames(base_zip)
+
+    files = sorted(p.name for p in runner.frames_dir.glob("*.jpg"))
+    assert files == [
+        "clip0_frame_00001.jpg",
+        "clip0_frame_00002.jpg",
+        "frame_00000.jpg",
+        "frame_00001.jpg",
+        "frame_00002.jpg",
+    ]
+
+
+def test_refine_base_frames_merge_missing_zip_is_noop(tmp_path):
+    """Missing zip logs a skip line, doesn't crash, doesn't touch existing frames."""
+    from vaultwares_studio.pipeline import DigitalTwinStudioRunner
+
+    manifest = create_job_manifest(source_video=DEFAULT_SOURCE_VIDEO)
+    runner = DigitalTwinStudioRunner(manifest, lambda _m: None)
+    runner.frames_dir.mkdir(parents=True, exist_ok=True)
+    (runner.frames_dir / "frame_00001.jpg").write_bytes(b"new")
+
+    runner._merge_refine_base_frames(tmp_path / "does-not-exist.zip")
+
+    files = sorted(p.name for p in runner.frames_dir.glob("*.jpg"))
+    assert files == ["frame_00001.jpg"]

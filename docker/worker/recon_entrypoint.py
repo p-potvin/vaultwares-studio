@@ -55,6 +55,10 @@ def vocab_tree_augment_and_remap(processed: Path, vocab_tree: Path) -> int:
         print("[recon] vocab_tree: missing database or image dir, skipping.", flush=True)
         return 0
     print("[recon] augmenting database with vocab_tree matches", flush=True)
+    # GPU SIFT matching: COLMAP's GPU path was previously failing silently in
+    # the L4 container; defaulting to GPU now and letting the run fail loudly
+    # if the install is still broken — cheaper to learn that than to keep
+    # burning ~$1.50 per refine on L4-grade dollars for CPU SIFT.
     result = run([
         "colmap", "vocab_tree_matcher",
         "--database_path", str(database),
@@ -62,6 +66,7 @@ def vocab_tree_augment_and_remap(processed: Path, vocab_tree: Path) -> int:
         # 100 nearest-neighbour images per query is the COLMAP default; bumping
         # higher catches more loop closures at proportional CPU cost.
         "--VocabTreeMatching.num_images", "100",
+        "--SiftMatching.use_gpu", "1",
     ])
     if result.returncode != 0:
         print(f"[recon] vocab_tree_matcher exit={result.returncode}", flush=True)
@@ -355,11 +360,278 @@ def fail(out_dir: Path, code: str, detail: str) -> int:
     return 1
 
 
+def refine_mode_setup(
+    in_dir: Path, processed: Path, train_out: Path
+) -> tuple[Path, list[str]]:
+    """Restore the base reconstruction's database/sparse model + train checkpoint.
+
+    Reads model.zip (the base train output tree) and processed_min.zip (base
+    colmap_database + sparse/*.bin + transforms.json + sparse_pc.ply) from
+    VW_IN. Lays them out so the regular COLMAP + ns-train commands see them
+    in the expected places. Returns the load-dir to pass to ns-train (the
+    nerfstudio timestamp dir containing config.yml + nerfstudio_models/) and
+    the list of new image filenames (so we know which to feature-extract).
+    """
+    bundle_processed = in_dir / "processed_min.zip"
+    bundle_model = in_dir / "model.zip"
+    if not bundle_processed.exists():
+        raise RuntimeError(f"--refine-mode but processed_min.zip not in VW_IN ({in_dir})")
+    if not bundle_model.exists():
+        raise RuntimeError(f"--refine-mode but model.zip not in VW_IN ({in_dir})")
+
+    # Restore the base reconstruction state into the standard processed/ layout
+    # so subsequent COLMAP commands and ns-process-data see what they expect.
+    base = Path("/tmp/recon/base_processed")
+    base.mkdir(parents=True, exist_ok=True)
+    with zipfile.ZipFile(bundle_processed) as archive:
+        archive.extractall(base)
+    (processed / "colmap").mkdir(parents=True, exist_ok=True)
+    (processed / "colmap" / "sparse" / "0").mkdir(parents=True, exist_ok=True)
+    shutil.copyfile(base / "colmap_database.db", processed / "colmap" / "database.db")
+    for name in ("cameras.bin", "images.bin", "points3D.bin"):
+        src = base / "sparse" / name
+        if not src.exists():
+            raise RuntimeError(
+                f"refine bundle is missing sparse/{name} — base job was built "
+                "before sparse-model archival; re-run the base in v2-compatible "
+                "mode before refining."
+            )
+        shutil.copyfile(src, processed / "colmap" / "sparse" / "0" / name)
+
+    # Identify NEW images = those in VW_IN/images/ that aren't yet in the
+    # base database. Everything else gets skipped on feature_extractor (its
+    # features are already cached).
+    import sqlite3
+
+    con = sqlite3.connect(str(processed / "colmap" / "database.db"))
+    existing = {row[0] for row in con.execute("SELECT name FROM images").fetchall()}
+    con.close()
+    images_dir = Path("/tmp/recon/images")
+    all_imgs = [p.name for p in sorted(images_dir.iterdir()) if p.suffix.lower() in (".jpg", ".png")]
+    new_imgs = [name for name in all_imgs if name not in existing]
+    print(f"[refine] base images: {len(existing)} | new images: {len(new_imgs)} | total on disk: {len(all_imgs)}", flush=True)
+
+    # Find the experiment timestamp dir inside the unpacked model.zip — it's
+    # the dir containing config.yml + nerfstudio_models/. ns-train --load-dir
+    # wants this as its argument.
+    base_train = Path("/tmp/recon/base_train")
+    base_train.mkdir(parents=True, exist_ok=True)
+    with zipfile.ZipFile(bundle_model) as archive:
+        archive.extractall(base_train)
+    configs = sorted(base_train.rglob("config.yml"), key=lambda p: p.stat().st_mtime, reverse=True)
+    if not configs:
+        raise RuntimeError("refine model.zip contains no config.yml")
+    load_dir = configs[0].parent
+    ckpts = list((load_dir / "nerfstudio_models").glob("*.ckpt")) if (load_dir / "nerfstudio_models").exists() else []
+    if not ckpts:
+        raise RuntimeError(f"no checkpoint .ckpt files found under {load_dir / 'nerfstudio_models'}")
+    print(f"[refine] checkpoint load-dir: {load_dir} ({len(ckpts)} ckpts)", flush=True)
+    return load_dir, new_imgs
+
+
+def refine_register_new_images(
+    processed: Path, new_imgs: list[str], vocab_tree: Path | None,
+    out_dir: Path | None = None,
+) -> int:
+    """Add new images to the existing sparse reconstruction via image_registrator.
+
+    Sequence:
+      feature_extractor (only new images via --image_list_path)
+        → sequential_matcher (within new images)
+        → vocab_tree_matcher (new vs everything, finds cross-clip matches)
+        → image_registrator (extends the base sparse model with new images)
+        → bundle_adjuster (joint refinement)
+        → ns-process-data --skip-colmap (regenerate transforms.json from final model)
+
+    Returns the new total registered-image count, or 0 on hard failure.
+
+    Passing out_dir triggers periodic database checkpointing — the augmented
+    colmap_database is copied to out_dir/colmap_database.db after each
+    expensive matcher pass so a mid-run cancellation preserves the work for
+    the next attempt (the standard mode already does this; refine mode used
+    to drop the floor on cancellation, which burned an entire run's worth of
+    cost when the user had to abort).
+    """
+    def _checkpoint_db(label: str) -> None:
+        if out_dir is None:
+            return
+        src = processed / "colmap" / "database.db"
+        if not src.exists():
+            return
+        try:
+            shutil.copyfile(src, out_dir / "colmap_database.db")
+            print(f"[refine] db checkpoint after {label}: {src.stat().st_size // 1_000_000} MB", flush=True)
+        except Exception as exc:  # noqa: BLE001
+            print(f"[refine] db checkpoint failed after {label}: {exc}", flush=True)
+    images_dir = Path("/tmp/recon/images")
+    database = processed / "colmap" / "database.db"
+    base_sparse = processed / "colmap" / "sparse" / "0"
+    list_path = Path("/tmp/recon/new_image_list.txt")
+    list_path.write_text("\n".join(new_imgs) + "\n", encoding="utf-8")
+
+    # Feature extractor on new images only. single_camera so we share the
+    # base run's intrinsics (the iPhone is the same camera — must match for
+    # the registered images to share a camera_id with the base set).
+    # GPU SIFT for all refine matchers. The L4 container's COLMAP CUDA path
+    # was previously broken (silent degradation), so we hard-coded use_gpu=0.
+    # Re-enabling because at L4 prices CPU SIFT cost ~$1.50/refine. Failures
+    # here exit non-zero, which is loud + recoverable (worst case: revert).
+    fe = run([
+        "colmap", "feature_extractor",
+        "--database_path", str(database),
+        "--image_path", str(images_dir),
+        "--image_list_path", str(list_path),
+        "--ImageReader.single_camera", "1",
+        "--SiftExtraction.use_gpu", "1",
+    ])
+    if fe.returncode != 0:
+        print(f"[refine] feature_extractor failed: exit={fe.returncode}", flush=True)
+        return 0
+    _checkpoint_db("feature_extractor")
+
+    # Sequential matcher within new images (cheap; catches adjacent-frame pairs).
+    sm = run([
+        "colmap", "sequential_matcher",
+        "--database_path", str(database),
+        "--SiftMatching.use_gpu", "1",
+    ])
+    if sm.returncode != 0:
+        print(f"[refine] sequential_matcher failed: exit={sm.returncode}", flush=True)
+    _checkpoint_db("sequential_matcher")
+
+    # Vocab tree matcher: cross-matches new images against the whole database
+    # (including the base set). This is where new + base get linked.
+    if vocab_tree is not None:
+        vtm = run([
+            "colmap", "vocab_tree_matcher",
+            "--database_path", str(database),
+            "--VocabTreeMatching.vocab_tree_path", str(vocab_tree),
+            "--VocabTreeMatching.num_images", "100",
+            "--SiftMatching.use_gpu", "1",
+        ])
+        if vtm.returncode != 0:
+            print(f"[refine] vocab_tree_matcher failed: exit={vtm.returncode}", flush=True)
+        _checkpoint_db("vocab_tree_matcher")
+
+    # image_registrator extends the base sparse model with the new images.
+    # Outputs cameras.bin/images.bin/points3D.bin into a new dir.
+    registered = processed / "colmap" / "sparse" / "registered"
+    registered.mkdir(parents=True, exist_ok=True)
+    ir = run([
+        "colmap", "image_registrator",
+        "--database_path", str(database),
+        "--input_path", str(base_sparse),
+        "--output_path", str(registered),
+    ])
+    if ir.returncode != 0:
+        return 0
+
+    # Bundle adjuster refines the joint solution. Skip if it fails — the
+    # unrefined model is still usable.
+    run([
+        "colmap", "bundle_adjuster",
+        "--input_path", str(registered),
+        "--output_path", str(registered),
+    ])
+
+    # Regen transforms.json from the registered model. ns-process-data with
+    # --skip-colmap reads the model at --colmap-model-path and rewrites
+    # transforms.json + sparse_pc.ply.
+    regen = run([
+        "ns-process-data", "images",
+        "--data", str(images_dir),
+        "--output-dir", str(processed),
+        "--skip-colmap",
+        "--skip-image-processing",
+        "--colmap-model-path", str(registered.relative_to(processed)),
+    ])
+    if regen.returncode != 0:
+        return 0
+    return count_registered_images(processed)
+
+
+def finish_export(
+    args, out_dir: Path, processed: Path, train_out: Path, export: Path,
+    timings: dict, frame_count: int, registered: int, matching_used: str,
+) -> int:
+    """Shared post-train flow: ns-export, copy outputs, archive bundles, summary."""
+    configs = sorted(train_out.rglob("config.yml"), key=lambda p: p.stat().st_mtime, reverse=True)
+    if not configs:
+        return fail(out_dir, "no_config", "no config.yml produced by training")
+    started = time.monotonic()
+    exported = run([
+        "ns-export", "gaussian-splat",
+        "--load-config", str(configs[0]),
+        "--output-dir", str(export),
+    ])
+    timings["export_s"] = round(time.monotonic() - started, 1)
+    if exported.returncode != 0:
+        return fail(out_dir, "export_failed", f"ns-export exit {exported.returncode}")
+
+    plys = sorted(export.rglob("*.ply"), key=lambda p: p.stat().st_mtime, reverse=True)
+    if not plys:
+        return fail(out_dir, "no_ply", "ns-export produced no PLY")
+    shutil.copyfile(plys[0], out_dir / "splat.ply")
+
+    if args.keep_checkpoint:
+        shutil.make_archive(str(out_dir / "model"), "zip", root_dir=str(train_out))
+        with zipfile.ZipFile(out_dir / "processed_min.zip", "w", zipfile.ZIP_DEFLATED) as archive:
+            for name in ("transforms.json", "sparse_pc.ply"):
+                candidate = processed / name
+                if candidate.exists():
+                    archive.write(candidate, name)
+            db_candidate = processed / "colmap" / "database.db"
+            if db_candidate.exists():
+                archive.write(db_candidate, "colmap_database.db")
+            # See main() for why we archive sparse/*.bin.
+            sparse_dirs = sorted(
+                {p.parent for p in processed.rglob("cameras.bin")},
+                key=lambda p: p.stat().st_mtime,
+                reverse=True,
+            )
+            final_sparse = next(
+                (
+                    d for d in sparse_dirs
+                    if (d / "images.bin").exists() and (d / "points3D.bin").exists()
+                ),
+                None,
+            )
+            if final_sparse is not None:
+                for name in ("cameras.bin", "images.bin", "points3D.bin"):
+                    archive.write(final_sparse / name, f"sparse/{name}")
+        print("[recon] checkpoint archived (model.zip + processed_min.zip)", flush=True)
+
+    (out_dir / "summary.json").write_text(
+        json.dumps(
+            {
+                "frames": frame_count,
+                "registered_images": registered,
+                "matching_method": matching_used,
+                "train_args": json.loads(args.train_args),
+                "timings": timings,
+            },
+            indent=2,
+        ),
+        encoding="utf-8",
+    )
+    print("[recon] complete", flush=True)
+    return 0
+
+
 def main() -> int:  # noqa: PLR0911, PLR0915
     parser = argparse.ArgumentParser()
     parser.add_argument("--downscale", type=int, default=2)
     parser.add_argument("--train-args", default="[]", help="JSON list of ns-train args")
     parser.add_argument("--keep-checkpoint", action="store_true")
+    parser.add_argument(
+        "--refine-mode",
+        action="store_true",
+        help=(
+            "Refine an existing splat: VW_IN must contain model.zip + "
+            "processed_min.zip from a base run. Skips full COLMAP, uses "
+            "image_registrator + ns-train --load-dir."
+        ),
+    )
     args = parser.parse_args()
 
     in_dir = Path(os.environ["VW_IN"])
@@ -381,6 +653,65 @@ def main() -> int:  # noqa: PLR0911, PLR0915
     frame_count = len(list(images.rglob("*.png"))) + len(list(images.rglob("*.jpg")))
     print(f"[recon] {frame_count} frames extracted", flush=True)
 
+    if args.refine_mode:
+        # Restore base state, register new images, regenerate transforms.json,
+        # then jump straight to training with --load-dir. Skips the standard
+        # ns-process-data + retry_mapper + vocab-tree-fallback dance.
+        started = time.monotonic()
+        try:
+            load_dir, new_imgs = refine_mode_setup(in_dir, processed, train_out)
+        except Exception as exc:  # noqa: BLE001
+            return fail(out_dir, "refine_setup_failed", str(exc))
+        timings["refine_setup_s"] = round(time.monotonic() - started, 1)
+        started = time.monotonic()
+        vocab_tree_path = ensure_vocab_tree()
+        registered = refine_register_new_images(
+            processed, new_imgs, vocab_tree_path, out_dir=out_dir,
+        )
+        timings["refine_register_s"] = round(time.monotonic() - started, 1)
+        if registered == 0:
+            return fail(
+                out_dir,
+                "refine_registration_failed",
+                "image_registrator could not add the new images to the base "
+                "reconstruction. Common causes: lighting drift too large for "
+                "SIFT matching, or new captures don't overlap the base scene.",
+            )
+        matching_used = "refine+image_registrator"
+        print(f"[refine] joint registered images: {registered}/{frame_count}", flush=True)
+
+        # Archive the augmented database immediately so a downstream failure
+        # still leaves us with usable diagnostics.
+        if (processed / "colmap" / "database.db").exists():
+            try:
+                shutil.copyfile(
+                    processed / "colmap" / "database.db",
+                    out_dir / "colmap_database.db",
+                )
+            except Exception as exc:  # noqa: BLE001
+                print(f"[refine] db archive failed: {exc}", flush=True)
+
+        train_args = filter_supported_flags(json.loads(args.train_args))
+        started = time.monotonic()
+        train = run([
+            "ns-train", "splatfacto",
+            "--data", str(processed),
+            "--output-dir", str(train_out),
+            "--load-dir", str(load_dir / "nerfstudio_models"),
+            *train_args,
+            "nerfstudio-data",
+            "--downscale-factor", str(args.downscale),
+        ])
+        timings["train_s"] = round(time.monotonic() - started, 1)
+        if train.returncode != 0:
+            return fail(out_dir, "training_failed", f"ns-train (resume) exit {train.returncode}")
+        # Fall through to export/archive logic below — share with standard mode.
+        # Done by jumping past the standard flow and into the post-train section.
+        return finish_export(
+            args, out_dir, processed, train_out, export, timings,
+            frame_count=frame_count, registered=registered, matching_used=matching_used,
+        )
+
     registered = 0
     matching_used = ""
     # Per-job minimum: 50% of the input frame count, or MIN_REGISTERED_IMAGES,
@@ -400,9 +731,11 @@ def main() -> int:  # noqa: PLR0911, PLR0915
         "--output-dir", str(processed),
         "--matching-method", "sequential",
         "--num-downscales", "3",
-        # CPU SIFT: COLMAP's GPU feature path fails silently in the L4 job
-        # container. CPU costs minutes, not correctness.
-        "--no-gpu",
+        # GPU SIFT: previously hard-coded to --no-gpu because the L4 container's
+        # COLMAP CUDA path was failing silently. Re-enabling now to see whether
+        # the current image works — CPU SIFT was costing ~5x in dollars at L4
+        # prices. Failure here is loud (process exit), unlike the silent
+        # degradation we used to see.
     ])
     timings["process_data_sequential_s"] = round(time.monotonic() - started, 1)
     if process.returncode != 0:
@@ -489,58 +822,10 @@ def main() -> int:  # noqa: PLR0911, PLR0915
     if train.returncode != 0:
         return fail(out_dir, "training_failed", f"ns-train exit {train.returncode}")
 
-    configs = sorted(train_out.rglob("config.yml"), key=lambda p: p.stat().st_mtime, reverse=True)
-    if not configs:
-        return fail(out_dir, "no_config", "no config.yml produced by training")
-    started = time.monotonic()
-    exported = run([
-        "ns-export", "gaussian-splat",
-        "--load-config", str(configs[0]),
-        "--output-dir", str(export),
-    ])
-    timings["export_s"] = round(time.monotonic() - started, 1)
-    if exported.returncode != 0:
-        return fail(out_dir, "export_failed", f"ns-export exit {exported.returncode}")
-
-    plys = sorted(export.rglob("*.ply"), key=lambda p: p.stat().st_mtime, reverse=True)
-    if not plys:
-        return fail(out_dir, "no_ply", "ns-export produced no PLY")
-    shutil.copyfile(plys[0], out_dir / "splat.ply")
-
-    if args.keep_checkpoint:
-        # Whole train tree (config.yml references absolute /tmp/recon paths;
-        # the render job recreates the same layout) + the processed-dataset
-        # essentials the dataparser needs at eval time.
-        shutil.make_archive(str(out_dir / "model"), "zip", root_dir=str(train_out))
-        with zipfile.ZipFile(out_dir / "processed_min.zip", "w", zipfile.ZIP_DEFLATED) as archive:
-            for name in ("transforms.json", "sparse_pc.ply"):
-                candidate = processed / name
-                if candidate.exists():
-                    archive.write(candidate, name)
-            # Ship the COLMAP database so we can run the smart init-pair
-            # picker locally on past failures and audit/iterate the heuristic
-            # without re-doing matching. Stored as colmap_database.db at the
-            # archive root for ergonomic local extraction.
-            db_candidate = processed / "colmap" / "database.db"
-            if db_candidate.exists():
-                archive.write(db_candidate, "colmap_database.db")
-        print("[recon] checkpoint archived (model.zip + processed_min.zip)", flush=True)
-
-    (out_dir / "summary.json").write_text(
-        json.dumps(
-            {
-                "frames": frame_count,
-                "registered_images": registered,
-                "matching_method": matching_used,
-                "train_args": train_args,
-                "timings": timings,
-            },
-            indent=2,
-        ),
-        encoding="utf-8",
+    return finish_export(
+        args, out_dir, processed, train_out, export, timings,
+        frame_count=frame_count, registered=registered, matching_used=matching_used,
     )
-    print("[recon] complete", flush=True)
-    return 0
 
 
 if __name__ == "__main__":
