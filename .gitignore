@@ -1,27 +1,6 @@
 # add new here
 inputs/
 
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
 # Byte-compiled / optimized / DLL files
 __pycache__/
 *.py[codz]
@@ -251,3 +230,5 @@ data/remote_compute.json
 Depth*
 Screen*
 inputs/
+
+data/
