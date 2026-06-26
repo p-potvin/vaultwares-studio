@@ -97,6 +97,10 @@ class StageContext:
     log: Callable[[str], None] = lambda _msg: None
     progress: Callable[[float, str], None] = lambda _pct, _msg: None
     cancel: CancelToken = field(default_factory=CancelToken)
+    # When True the runner skips uploading ctx.inputs and assumes the HF
+    # artifact dataset already has the correct files at jobs/<job_id>/<stage>/in/.
+    # Used by --resume-job to reuse a prior run's already-uploaded frames.zip.
+    skip_inputs_upload: bool = False
 
 
 @dataclass

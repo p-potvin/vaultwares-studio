@@ -719,10 +719,18 @@ class DigitalTwinStudioRunner:
             raise RuntimeError("Frame extraction must complete before reconstruction.")
         preset = get_preset(self.manifest.metadata.get("preset"))
         exported_ply: Path | None = None
+        resume_job_id: str | None = self.manifest.metadata.get("resume_job_id")
 
         if stage.placement == "remote" and self.remote_runner is not None:
             try:
-                exported_ply = self._run_remote_reconstruction(stage, preset)
+                if preset.split_jobs:
+                    exported_ply = self._run_split_remote_reconstruction(
+                        stage, preset, resume_job_id=resume_job_id
+                    )
+                else:
+                    exported_ply = self._run_remote_reconstruction(
+                        stage, preset, resume_job_id=resume_job_id
+                    )
             except StageCancelledError:
                 raise
             except CostDeniedError as exc:
@@ -787,8 +795,22 @@ class DigitalTwinStudioRunner:
                 "Decimated point cloud for the live viewer.",
             )
 
-    def _run_remote_reconstruction(self, stage: StageRecord, preset) -> Path | None:
-        """Train the splat on rented GPU compute (HF Jobs). Returns the splat PLY."""
+    def _run_split_remote_reconstruction(
+        self,
+        stage: StageRecord,
+        preset,
+        resume_job_id: str | None = None,
+    ) -> Path | None:
+        """Two-job split: SfM on cpu-upgrade, training on GPU.
+
+        Job A (cpu-upgrade) runs COLMAP (--sfm-only) and uploads
+        processed_min.zip to the HF artifact dataset under
+        jobs/<job_id>/reconstruction_sfm/out/processed_min.zip.
+
+        Job B (GPU, preset.flavor) pulls that artifact via extra_repo_inputs
+        and runs --train-only (skipping ns-process-data/COLMAP entirely).
+        Both are sequential — Job B blocks on Job A.
+        """
         import json as _json
         import zipfile
 
@@ -802,10 +824,166 @@ class DigitalTwinStudioRunner:
 
         frames_zip = self.recon_dir / "frames.zip"
         frame_paths = list_frames(self.frames_dir)
-        with zipfile.ZipFile(frames_zip, "w", zipfile.ZIP_STORED) as archive:
-            for frame in frame_paths:
-                archive.write(frame, frame.name)
-        self.log(f"Packed {len(frame_paths)} frames for remote reconstruction ({frames_zip.stat().st_size // 1_000_000} MB)")
+        hf_job_id = resume_job_id or self.manifest.job_id
+        if resume_job_id:
+            self.log(
+                f"[split] Reusing frames from prior job {resume_job_id} — "
+                f"skipping frames.zip upload ({len(frame_paths)} local frames)"
+            )
+        else:
+            with zipfile.ZipFile(frames_zip, "w", zipfile.ZIP_STORED) as archive:
+                for frame in frame_paths:
+                    archive.write(frame, frame.name)
+            self.log(
+                f"[split] Packed {len(frame_paths)} frames "
+                f"({frames_zip.stat().st_size // 1_000_000} MB)"
+            )
+
+        export_dir = self.recon_dir / "gsplat_export"
+        export_dir.mkdir(parents=True, exist_ok=True)
+        splat_path = export_dir / "splat.ply"
+        summary_path = self.recon_dir / "summary.json"
+        remote_out_dir = self.recon_dir / "remote_out"
+        bundle_model = remote_out_dir / "model.zip"
+        bundle_processed = remote_out_dir / "processed_min.zip"
+
+        # ---- Job A: SfM only on cpu-upgrade ----
+        refine_from = self.manifest.metadata.get("refine_from_job_id")
+        sfm_command = [
+            "python", "/opt/vw/recon_entrypoint.py",
+            "--sfm-only",
+            "--downscale", str(preset.downscale_factor),
+            "--keep-checkpoint",
+        ]
+        sfm_extra_inputs: list[str] = []
+        if refine_from:
+            # Pull base processed_min.zip so the SfM job can do image_registrator.
+            base_prefix = f"jobs/{refine_from}/reconstruction/out"
+            sfm_extra_inputs = [
+                f"{base_prefix}/model.zip",
+                f"{base_prefix}/processed_min.zip",
+            ]
+            sfm_command.append("--refine-mode")
+
+        # processed_min.zip from the SfM job is the only expected output for Job A.
+        sfm_processed_out = remote_out_dir / "sfm_processed_min.zip"
+        sfm_ctx = StageContext(
+            job_dir=self.root,
+            job_id=hf_job_id,
+            stage_key="reconstruction_sfm",
+            params={
+                "image": image_name,
+                "image_has_hub": True,
+                "flavor": preset.sfm_flavor,
+                "est_minutes": preset.sfm_est_minutes,
+                "timeout_seconds": int(max(3600, preset.sfm_est_minutes * 60 * 4)),
+                "command": sfm_command,
+                "extra_repo_inputs": sfm_extra_inputs,
+            },
+            inputs=[frames_zip],
+            expected_outputs=[sfm_processed_out],
+            log=self.log,
+            cancel=self.cancel_token,
+            skip_inputs_upload=bool(resume_job_id),
+        )
+        self.log(
+            f"[split] Job A (SfM, {preset.sfm_flavor}) — "
+            f"est {preset.sfm_est_minutes:.0f} min ~${preset.sfm_cost().est_usd:.2f}"
+        )
+        sfm_result = self.remote_runner.run(sfm_ctx)
+        stage.runner = self.remote_runner.name
+        if sfm_result.metadata:
+            record_spend(self.manifest, "reconstruction_sfm", sfm_result.metadata)
+        if not sfm_processed_out.exists():
+            raise RuntimeError(
+                "SfM job (Job A) did not produce processed_min.zip — "
+                "check the HF job logs for COLMAP errors."
+            )
+
+        # ---- Job B: training only on GPU ----
+        # Pull Job A's processed_min.zip from the artifact dataset (it was
+        # uploaded there by the SfM worker). No re-upload needed — xet.
+        sfm_out_prefix = f"jobs/{hf_job_id}/reconstruction_sfm/out"
+        train_command = [
+            "python", "/opt/vw/recon_entrypoint.py",
+            "--train-only",
+            "--downscale", str(preset.downscale_factor),
+            "--train-args", _json.dumps(preset.train_args()),
+            "--keep-checkpoint",
+        ]
+        train_extra_inputs = [f"{sfm_out_prefix}/processed_min.zip"]
+        if refine_from:
+            base_prefix = f"jobs/{refine_from}/reconstruction/out"
+            train_extra_inputs.append(f"{base_prefix}/model.zip")
+            train_command.append("--refine-mode")
+
+        train_ctx = StageContext(
+            job_dir=self.root,
+            job_id=hf_job_id,
+            stage_key="reconstruction",
+            params={
+                "image": image_name,
+                "image_has_hub": True,
+                "flavor": preset.flavor,
+                "est_minutes": preset.est_minutes,
+                "timeout_seconds": int(max(1800, preset.est_minutes * 60 * 4)),
+                "command": train_command,
+                "extra_repo_inputs": train_extra_inputs,
+            },
+            inputs=[],  # frames already on HF; processed_min.zip via extra_repo_inputs
+            expected_outputs=[splat_path, summary_path, bundle_model, bundle_processed],
+            log=self.log,
+            cancel=self.cancel_token,
+            skip_inputs_upload=True,  # no local inputs to upload for Job B
+        )
+        self.log(
+            f"[split] Job B (training, {preset.flavor}) — "
+            f"est {preset.est_minutes:.0f} min ~${preset.train_cost().est_usd:.2f}"
+        )
+        train_result = self.remote_runner.run(train_ctx)
+        stage.params = {"preset": preset.key, "flavor": preset.flavor, "split_jobs": True}
+        if train_result.metadata:
+            record_spend(self.manifest, "reconstruction", train_result.metadata)
+        return splat_path if splat_path.exists() else None
+
+    def _run_remote_reconstruction(
+        self,
+        stage: StageRecord,
+        preset,
+        resume_job_id: str | None = None,
+    ) -> Path | None:
+        """Train the splat on rented GPU compute (HF Jobs). Returns the splat PLY.
+
+        When ``resume_job_id`` is provided the frames.zip upload is skipped and
+        the HF artifact prefix is set to the original job so the worker finds
+        the already-uploaded input on the dataset.
+        """
+        import json as _json
+        import zipfile
+
+        runner_config = getattr(self.remote_runner, "config", None)
+        image_name = getattr(runner_config, "worker_image", "") if runner_config else ""
+        if not image_name or image_name.startswith("python:"):
+            raise RuntimeError(
+                "Remote worker image not configured. Build it with "
+                "tools/build_worker_image.ps1 and set worker_image in Settings."
+            )
+
+        frames_zip = self.recon_dir / "frames.zip"
+        frame_paths = list_frames(self.frames_dir)
+        if resume_job_id:
+            self.log(
+                f"[resume] Reusing frames from prior job {resume_job_id} — "
+                f"skipping frames.zip upload ({len(frame_paths)} local frames available for reference)"
+            )
+        else:
+            with zipfile.ZipFile(frames_zip, "w", zipfile.ZIP_STORED) as archive:
+                for frame in frame_paths:
+                    archive.write(frame, frame.name)
+            self.log(
+                f"Packed {len(frame_paths)} frames for remote reconstruction "
+                f"({frames_zip.stat().st_size // 1_000_000} MB)"
+            )
 
         export_dir = self.recon_dir / "gsplat_export"
         export_dir.mkdir(parents=True, exist_ok=True)
@@ -838,9 +1016,12 @@ class DigitalTwinStudioRunner:
             ]
             worker_command.append("--refine-mode")
 
+        # When resuming, reuse the original job's HF artifact prefix so the
+        # worker finds the already-uploaded frames.zip without re-uploading.
+        hf_job_id = resume_job_id or self.manifest.job_id
         ctx = StageContext(
             job_dir=self.root,
-            job_id=self.manifest.job_id,
+            job_id=hf_job_id,
             stage_key="reconstruction",
             params={
                 "image": image_name,
@@ -861,6 +1042,7 @@ class DigitalTwinStudioRunner:
             expected_outputs=[splat_path, summary_path, bundle_model, bundle_processed],
             log=self.log,
             cancel=self.cancel_token,
+            skip_inputs_upload=bool(resume_job_id),
         )
         result = self.remote_runner.run(ctx)
         stage.runner = self.remote_runner.name

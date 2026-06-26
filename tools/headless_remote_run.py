@@ -26,7 +26,10 @@ sys.path.insert(0, str(ROOT))
 from vaultwares_studio.pipeline import (  # noqa: E402
     DEFAULT_SOURCE_VIDEO,
     DigitalTwinStudioRunner,
+    StageState,
     create_job_manifest,
+    load_job_manifest,
+    save_job_manifest,
 )
 from vaultwares_studio.presets import get_preset  # noqa: E402
 from vaultwares_studio.runners import HfJobsConfig, HfJobsStageRunner  # noqa: E402
@@ -87,17 +90,25 @@ def main() -> int:
             "supervising views disagree — match conditions when you can."
         ),
     )
+    parser.add_argument(
+        "--resume-job",
+        default=None,
+        metavar="JOB_ID",
+        help=(
+            "Resume a failed job by reusing its already-uploaded HF frames.zip. "
+            "Pass the local job id (e.g. local-run-20260615-065732). The prior "
+            "job's manifest is loaded, frame extraction is skipped (frames already "
+            "on HF), and reconstruction is re-queued against the same artifact path. "
+            "--video, --preset, and --refine-from are inferred from the prior manifest "
+            "unless explicitly overridden on the command line."
+        ),
+    )
     args = parser.parse_args()
 
-    videos = args.video or [str(DEFAULT_SOURCE_VIDEO)]
-    primary_video, *extra_videos = videos
     preset = get_preset(args.preset)
-    estimate = preset.cost()
-    print(f"[run] videos={videos} preset={preset.key} | remote cost estimate: {estimate.summary()}")
-    if args.refine_from:
-        print(f"[run] refine mode: combining frames with base job {args.refine_from}")
-    if extra_videos:
-        print(f"[run] additional videos ({len(extra_videos)}) will be extracted alongside the primary")
+
+    def log(message: str) -> None:
+        print(f"[{time.strftime('%H:%M:%S')}] {message}", flush=True)
 
     remote_runner = None
     if args.yes:
@@ -110,27 +121,75 @@ def main() -> int:
     else:
         print("[run] --yes not given: remote stage will fall back to the local quick path")
 
-    manifest = create_job_manifest(source_video=primary_video)
-    manifest.metadata["preset"] = preset.key
-    if extra_videos:
-        manifest.metadata["extra_videos"] = extra_videos
-    print(f"[run] job: {manifest.job_id} -> {manifest.output_dir}")
-
-    def log(message: str) -> None:
-        print(f"[{time.strftime('%H:%M:%S')}] {message}", flush=True)
-
-    if args.refine_from:
-        # Cache the base frames.zip inside the new job dir; frame_extraction
-        # reads the path from manifest.metadata and unpacks it next to the
-        # freshly-extracted new frames.
-        base_frames_path = Path(manifest.output_dir) / "frames" / "_base_frames.zip"
-        try:
-            _pull_base_frames_zip(args.refine_from, base_frames_path, log)
-        except Exception as exc:  # noqa: BLE001
-            print(f"[refine] base frames pull failed: {exc}")
+    if args.resume_job:
+        resume_job_dir = ROOT / "data" / "jobs" / args.resume_job
+        resume_manifest_path = resume_job_dir / "manifest.json"
+        if not resume_manifest_path.exists():
+            print(f"[resume] manifest not found: {resume_manifest_path}", file=sys.stderr)
             return 1
-        manifest.metadata["refine_from_job_id"] = args.refine_from
-        manifest.metadata["refine_base_frames_zip"] = str(base_frames_path)
+        prior = load_job_manifest(resume_manifest_path)
+        # Inherit videos and preset from prior manifest unless explicitly overridden.
+        if args.video is None:
+            primary_video = prior.source_video
+            extra_videos_from_prior = prior.metadata.get("extra_videos", [])
+            extra_videos = [str(ROOT / v) if not Path(v).is_absolute() else v
+                            for v in extra_videos_from_prior]
+        else:
+            primary_video, *extra_videos = args.video
+        if prior.metadata.get("preset") and args.preset == "draft":
+            preset = get_preset(prior.metadata["preset"])
+        print(f"[resume] resuming {args.resume_job} | preset={preset.key} | reusing HF frames")
+        print(f"[resume] remote cost estimate: {preset.cost().summary()}")
+        print(f"[resume] refine_from: {prior.metadata.get('refine_from_job_id', '-')}")
+
+        # Create a fresh local job that clones the prior manifest's intent.
+        manifest = create_job_manifest(source_video=primary_video)
+        manifest.metadata["preset"] = preset.key
+        if extra_videos:
+            manifest.metadata["extra_videos"] = extra_videos
+        if prior.metadata.get("refine_from_job_id"):
+            manifest.metadata["refine_from_job_id"] = prior.metadata["refine_from_job_id"]
+            manifest.metadata["refine_base_frames_zip"] = prior.metadata.get(
+                "refine_base_frames_zip", ""
+            )
+        # Key field: tells _run_remote_reconstruction which job's HF prefix to use.
+        manifest.metadata["resume_job_id"] = args.resume_job
+
+        # Mark video_intake and frame_extraction as complete so run_remaining
+        # skips them — the frames already exist on HF from the prior run.
+        for stage in manifest.stages:
+            if stage.key in ("video_intake", "frame_extraction"):
+                stage.state = StageState.COMPLETE.value
+                stage.message = f"Skipped (resuming from {args.resume_job})"
+        manifest.current_stage_key = "reconstruction"
+        save_job_manifest(manifest)
+        print(f"[resume] new job: {manifest.job_id} -> {manifest.output_dir}")
+
+    else:
+        videos = args.video or [str(DEFAULT_SOURCE_VIDEO)]
+        primary_video, *extra_videos = videos
+        estimate = preset.cost()
+        print(f"[run] videos={videos} preset={preset.key} | remote cost estimate: {estimate.summary()}")
+        if args.refine_from:
+            print(f"[run] refine mode: combining frames with base job {args.refine_from}")
+        if extra_videos:
+            print(f"[run] additional videos ({len(extra_videos)}) will be extracted alongside the primary")
+
+        manifest = create_job_manifest(source_video=primary_video)
+        manifest.metadata["preset"] = preset.key
+        if extra_videos:
+            manifest.metadata["extra_videos"] = extra_videos
+        print(f"[run] job: {manifest.job_id} -> {manifest.output_dir}")
+
+        if args.refine_from:
+            base_frames_path = Path(manifest.output_dir) / "frames" / "_base_frames.zip"
+            try:
+                _pull_base_frames_zip(args.refine_from, base_frames_path, log)
+            except Exception as exc:  # noqa: BLE001
+                print(f"[refine] base frames pull failed: {exc}")
+                return 1
+            manifest.metadata["refine_from_job_id"] = args.refine_from
+            manifest.metadata["refine_base_frames_zip"] = str(base_frames_path)
 
     runner = DigitalTwinStudioRunner(manifest, log, remote_runner=remote_runner)
     started = time.monotonic()

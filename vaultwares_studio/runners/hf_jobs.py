@@ -211,13 +211,16 @@ class HfJobsStageRunner(StageRunner):
         prefix = f"jobs/{ctx.job_id}/{ctx.stage_key}"
 
         for path in ctx.inputs:
-            ctx.log(f"[hf-jobs] uploading input {path.name}")
-            api.upload_file(
-                path_or_fileobj=str(path),
-                path_in_repo=f"{prefix}/in/{path.name}",
-                repo_id=repo,
-                repo_type="dataset",
-            )
+            if ctx.skip_inputs_upload:
+                ctx.log(f"[hf-jobs] skipping upload of {path.name} (--resume-job: already on HF)")
+            else:
+                ctx.log(f"[hf-jobs] uploading input {path.name}")
+                api.upload_file(
+                    path_or_fileobj=str(path),
+                    path_in_repo=f"{prefix}/in/{path.name}",
+                    repo_id=repo,
+                    repo_type="dataset",
+                )
 
         stage_config = {
             "repo": repo,

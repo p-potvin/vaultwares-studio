@@ -632,6 +632,24 @@ def main() -> int:  # noqa: PLR0911, PLR0915
             "image_registrator + ns-train --load-dir."
         ),
     )
+    parser.add_argument(
+        "--sfm-only",
+        action="store_true",
+        help=(
+            "Split-job mode, Job A: run COLMAP (feature extraction + matching + "
+            "mapping) only. Writes processed_min.zip to $VW_OUT then exits. "
+            "No ns-train is invoked. Used by the cpu-upgrade leg of split presets."
+        ),
+    )
+    parser.add_argument(
+        "--train-only",
+        action="store_true",
+        help=(
+            "Split-job mode, Job B: skip ns-process-data/COLMAP entirely. "
+            "Expects processed_min.zip (and model.zip for --refine-mode) already "
+            "in $VW_IN via extra_repo_inputs. Runs ns-train + ns-export only."
+        ),
+    )
     args = parser.parse_args()
 
     in_dir = Path(os.environ["VW_IN"])
@@ -653,10 +671,81 @@ def main() -> int:  # noqa: PLR0911, PLR0915
     frame_count = len(list(images.rglob("*.png"))) + len(list(images.rglob("*.jpg")))
     print(f"[recon] {frame_count} frames extracted", flush=True)
 
-    if args.refine_mode:
+    if args.sfm_only and args.train_only:
+        return fail(out_dir, "bad_args", "--sfm-only and --train-only are mutually exclusive")
+
+    if args.train_only:
+        # ---- Split-job mode, Job B: training only ----
+        # processed_min.zip arrives in VW_IN (via extra_repo_inputs from Job A).
+        # model.zip is also in VW_IN when --refine-mode is set.
+        processed_zip = in_dir / "processed_min.zip"
+        if not processed_zip.exists():
+            return fail(out_dir, "missing_input",
+                        "--train-only requires processed_min.zip in $VW_IN (produced by Job A --sfm-only)")
+        # Unpack processed dataset into the expected location.
+        with zipfile.ZipFile(processed_zip) as archive:
+            archive.extractall(processed)
+        # Recreate the colmap/ layout that ns-train's nerfstudio-data dataparser expects.
+        # processed_min.zip packs: transforms.json, sparse_pc.ply, colmap_database.db,
+        # sparse/cameras.bin, sparse/images.bin, sparse/points3D.bin.
+        # Move colmap_database.db and sparse/ to processed/colmap/ if they are at root.
+        if (processed / "colmap_database.db").exists() and not (processed / "colmap" / "database.db").exists():
+            (processed / "colmap").mkdir(parents=True, exist_ok=True)
+            shutil.move(str(processed / "colmap_database.db"), str(processed / "colmap" / "database.db"))
+        if (processed / "sparse").exists() and not (processed / "colmap" / "sparse").exists():
+            shutil.move(str(processed / "sparse"), str(processed / "colmap" / "sparse"))
+        # Build images/ from the frames.zip (same as standard mode).
+        print(f"[train-only] {frame_count} frames, dataset unpacked", flush=True)
+
+        load_dir: Path | None = None
+        if args.refine_mode:
+            # In refine+train-only, we need model.zip for --load-dir but skip
+            # image_registrator (that was done in Job A --sfm-only --refine-mode).
+            # processed_min.zip already contains the registered transforms.json.
+            bundle_model = in_dir / "model.zip"
+            if not bundle_model.exists():
+                return fail(out_dir, "missing_input",
+                            "--train-only --refine-mode requires model.zip in $VW_IN")
+            base_train = Path("/tmp/recon/base_train")
+            base_train.mkdir(parents=True, exist_ok=True)
+            with zipfile.ZipFile(bundle_model) as archive:
+                archive.extractall(base_train)
+            configs = sorted(base_train.rglob("config.yml"),
+                             key=lambda p: p.stat().st_mtime, reverse=True)
+            if not configs:
+                return fail(out_dir, "refine_setup_failed", "model.zip contains no config.yml")
+            load_dir = configs[0].parent
+            print(f"[train-only] checkpoint load-dir: {load_dir}", flush=True)
+
+        registered = count_registered_images(processed)
+        print(f"[train-only] registered images from dataset: {registered}/{frame_count}", flush=True)
+        train_args = filter_supported_flags(json.loads(args.train_args))
+        started = time.monotonic()
+        train_cmd = [
+            "ns-train", "splatfacto",
+            "--data", str(processed),
+            "--output-dir", str(train_out),
+            *train_args,
+            "nerfstudio-data",
+            "--downscale-factor", str(args.downscale),
+        ]
+        if load_dir is not None:
+            train_cmd.extend(["--load-dir", str(load_dir / "nerfstudio_models")])
+        train = run(train_cmd)
+        timings["train_s"] = round(time.monotonic() - started, 1)
+        if train.returncode != 0:
+            return fail(out_dir, "training_failed", f"ns-train (train-only) exit {train.returncode}")
+        return finish_export(
+            args, out_dir, processed, train_out, export, timings,
+            frame_count=frame_count, registered=registered,
+            matching_used="train-only (sfm from Job A)",
+        )
+
+    if args.refine_mode and not args.train_only:
         # Restore base state, register new images, regenerate transforms.json,
-        # then jump straight to training with --load-dir. Skips the standard
-        # ns-process-data + retry_mapper + vocab-tree-fallback dance.
+        # then either write processed_min.zip (--sfm-only) or jump straight to
+        # training with --load-dir. Skips the standard ns-process-data +
+        # retry_mapper + vocab-tree-fallback dance.
         started = time.monotonic()
         try:
             load_dir, new_imgs = refine_mode_setup(in_dir, processed, train_out)
@@ -691,6 +780,38 @@ def main() -> int:  # noqa: PLR0911, PLR0915
             except Exception as exc:  # noqa: BLE001
                 print(f"[refine] db archive failed: {exc}", flush=True)
 
+        if args.sfm_only:
+            # Split-job mode, Job A: SfM complete. Write processed_min.zip and exit.
+            # Job B (--train-only --refine-mode) picks it up via extra_repo_inputs.
+            print("[sfm-only] SfM complete (refine+image_registrator), writing processed_min.zip", flush=True)
+            with zipfile.ZipFile(out_dir / "processed_min.zip", "w", zipfile.ZIP_DEFLATED) as archive:
+                for name in ("transforms.json", "sparse_pc.ply"):
+                    candidate = processed / name
+                    if candidate.exists():
+                        archive.write(candidate, name)
+                db_candidate = processed / "colmap" / "database.db"
+                if db_candidate.exists():
+                    archive.write(db_candidate, "colmap_database.db")
+                sparse_dirs = sorted(
+                    {p.parent for p in processed.rglob("cameras.bin")},
+                    key=lambda p: p.stat().st_mtime, reverse=True,
+                )
+                final_sparse = next(
+                    (d for d in sparse_dirs
+                     if (d / "images.bin").exists() and (d / "points3D.bin").exists()),
+                    None,
+                )
+                if final_sparse is not None:
+                    for name in ("cameras.bin", "images.bin", "points3D.bin"):
+                        archive.write(final_sparse / name, f"sparse/{name}")
+            (out_dir / "summary.json").write_text(
+                json.dumps({"frames": frame_count, "registered_images": registered,
+                            "matching_used": matching_used, "timings": timings}, indent=2),
+                encoding="utf-8",
+            )
+            print("[sfm-only] complete", flush=True)
+            return 0
+
         train_args = filter_supported_flags(json.loads(args.train_args))
         started = time.monotonic()
         train = run([
@@ -705,8 +826,6 @@ def main() -> int:  # noqa: PLR0911, PLR0915
         timings["train_s"] = round(time.monotonic() - started, 1)
         if train.returncode != 0:
             return fail(out_dir, "training_failed", f"ns-train (resume) exit {train.returncode}")
-        # Fall through to export/archive logic below — share with standard mode.
-        # Done by jumping past the standard flow and into the post-train section.
         return finish_export(
             args, out_dir, processed, train_out, export, timings,
             frame_count=frame_count, registered=registered, matching_used=matching_used,
@@ -806,6 +925,38 @@ def main() -> int:  # noqa: PLR0911, PLR0915
             "lighting consistent (cloudy beats sunny), avoid pure rotation pans and any "
             "shots through glass, water, or mirrors.",
         )
+
+    if args.sfm_only:
+        # Split-job mode, Job A: SfM complete. Write processed_min.zip and exit.
+        # Job B (--train-only) picks up the dataset via extra_repo_inputs.
+        print("[sfm-only] SfM complete, writing processed_min.zip", flush=True)
+        with zipfile.ZipFile(out_dir / "processed_min.zip", "w", zipfile.ZIP_DEFLATED) as archive:
+            for name in ("transforms.json", "sparse_pc.ply"):
+                candidate = processed / name
+                if candidate.exists():
+                    archive.write(candidate, name)
+            db_candidate = processed / "colmap" / "database.db"
+            if db_candidate.exists():
+                archive.write(db_candidate, "colmap_database.db")
+            sparse_dirs = sorted(
+                {p.parent for p in processed.rglob("cameras.bin")},
+                key=lambda p: p.stat().st_mtime, reverse=True,
+            )
+            final_sparse = next(
+                (d for d in sparse_dirs
+                 if (d / "images.bin").exists() and (d / "points3D.bin").exists()),
+                None,
+            )
+            if final_sparse is not None:
+                for name in ("cameras.bin", "images.bin", "points3D.bin"):
+                    archive.write(final_sparse / name, f"sparse/{name}")
+        (out_dir / "summary.json").write_text(
+            json.dumps({"frames": frame_count, "registered_images": registered,
+                        "matching_used": matching_used, "timings": timings}, indent=2),
+            encoding="utf-8",
+        )
+        print("[sfm-only] complete", flush=True)
+        return 0
 
     train_args = filter_supported_flags(json.loads(args.train_args))
     started = time.monotonic()

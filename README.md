@@ -1,17 +1,17 @@
 # vaultwares-studio
 
-`vaultwares-studio` is a local-first OpenUSD desktop app for turning a room video into a resumable digital-twin job with generated USD, camera previews, a walkthrough video, and optional VaultWares workflow export.
+`vaultwares-studio` is a local-first OpenUSD desktop app for turning room video into a digital-twin job: COLMAP feature extraction, Gaussian splat training (via Nerfstudio splatfacto), and USD composition — with remote GPU compute handled through Hugging Face Jobs (HF PRO). The GUI runs locally; heavy stages run on rented L4/A10G hardware and stream logs back in real time.
 
 If you are just trying to answer, "Does this repo work on my machine?", start with the smoke test. It produces a real `.usda` file you can inspect. If you want the working app, run the desktop studio.
 
 ## What You Can Run Today
 
-- `python gui_app.py` opens the desktop Digital Twin Studio app.
-- The app creates and resumes jobs under `data/jobs/`.
-- The full app run writes a manifest, extracted frames, USD stage, camera previews, and walkthrough MP4.
-- `pytest` runs the repo's supported tests.
-- The smoke test writes `data/test_outputs/smoke_scene.usda`.
-- `python usd_smoke.py` generates the same USD artifact without pytest.
+- `python gui_app.py` — Desktop Digital Twin Studio app (GUI).
+- `python tools/headless_remote_run.py --preset draft --yes` — Headless end-to-end run, dispatches a real HF Job for reconstruction.
+- `python tools/headless_remote_run.py --resume-job <job-id> --yes` — Re-queue a failed job reusing already-uploaded HF frames (no re-upload cost).
+- `python tools/recover_remote_recon.py --job <job-id>` — Pull outputs from a completed HF Job whose local poller died.
+- `pytest` — 83 tests covering pipeline stages, runners, splat I/O, presets, camera paths, robot lab, and resume-job wiring.
+- `python usd_smoke.py` — Minimal USD artifact generator (no heavy deps).
 
 ## Quick Start
 
@@ -39,6 +39,58 @@ If the test passes, you should see a line like this:
 
 ```text
 Generated USD artifact: .../data/test_outputs/smoke_scene.usda
+```
+
+## Remote Compute (HF Jobs)
+
+Heavy reconstruction stages run on Hugging Face Jobs (PRO account required, pre-paid credits). The worker image is `hf.co/spaces/clopeux/vw-studio-worker`.
+
+### Presets
+
+| Preset | Flavor(s) | Est. time | Est. cost | Notes |
+|--------|-----------|-----------|-----------|-------|
+| `draft` | l4x1 | ~15 min | ~$0.20 | 7k iterations, 4× downscale, ≤300k gaussians. Single job. |
+| `standard` | cpu-upgrade → l4x1 | ~60 min | ~$0.19 | 15k iterations, full-res. **Split:** SfM 35 min @ cpu-upgrade ($0.06) + training 25 min @ l4x1 ($0.33). Was $0.80 on a single l4x1. |
+| `refine` | cpu-upgrade → l4x1 | ~110 min | ~$0.42 | Fine-tune on existing checkpoint + COLMAP joint registration. **Split:** SfM 90 min @ cpu-upgrade ($0.15) + training 20 min @ l4x1 ($0.27). Was $1.60 on a single l4x1. |
+| `high` | a10g-large | ~75 min | ~$1.88 | 30k iterations, 2× downscale, ≤1.5M gaussians, antialiased. Single job. |
+
+> **How split jobs work:** Job A runs COLMAP (feature extraction + vocab-tree matching + mapping) on `cpu-upgrade` and exits, uploading `processed_min.zip`. Job B pulls that artifact via HF xet and runs only `ns-train + ns-export` on the GPU instance. Both jobs are sequential — the GPU is idle during SfM.
+>
+> **Note:** Estimates are billed-per-minute; the actual HF invoice is the authoritative price. The `refine` estimate assumes ~1,500 combined frames — smaller new-frame sets will finish faster.
+
+### Run a new job
+
+```powershell
+# Headless, approves cost automatically:
+.venv\Scripts\python.exe tools\headless_remote_run.py --preset standard --yes
+
+# Multi-video with refine from a prior completed job:
+.venv\Scripts\python.exe tools\headless_remote_run.py `
+  --video inputs/cloudyday1_june14_194sec.MOV `
+  --video inputs/cloudyday2_june14_348sec.MOV `
+  --preset refine `
+  --refine-from local-run-20260614-234541 `
+  --yes
+```
+
+### Resume a credit-killed job (reuse HF frames)
+
+If a job dies mid-run (402 credit exhaustion, network drop), re-queue without re-running frame extraction:
+
+```powershell
+.venv\Scripts\python.exe tools\headless_remote_run.py `
+  --resume-job local-run-20260615-065732 `
+  --yes
+```
+
+This reads the prior manifest (videos, preset, refine-from) automatically, marks intake and frame extraction as already-complete, and launches a new HF Job pointing at the existing `jobs/<prior-job-id>/reconstruction/in/frames.zip`. HF xet storage makes upload time negligible regardless.
+
+### Recover outputs from a completed HF Job
+
+If the local poller died but the job finished and uploaded outputs:
+
+```powershell
+.venv\Scripts\python.exe tools\recover_remote_recon.py --job local-run-20260613-211202
 ```
 
 ## Verified Test Output
@@ -255,8 +307,11 @@ See [TESTING.md](TESTING.md) for step-by-step testing instructions and troublesh
 
 ## Features
 
-- **Local-first OpenUSD Generation:** Turn room videos into resumable digital-twin jobs emitting valid `.usda` files.
-- **Robust App Mode:** Desktop studio app using fallback-safe reconstruction that writes deterministic placeholders when heavy tools are missing.
-- **Redis-backed Orchestration Pipeline:** Agent-driven tasks (via ExtrovertAgent base class) to extract frames, reconstruct 3D spaces, and compose USDs.
-- **Video Processing Pipeline:** Integrated FFmpeg support for sampling, trimming, resizing, and frame-level processing.
-- **Fallback-safe Reconstruction:** Sparse reconstruction (COLMAP) and Gaussian splatting (gsplat / Nerfstudio) with built-in placeholder fallback mechanism.
+- **Remote GPU Reconstruction:** COLMAP SfM + Nerfstudio splatfacto training dispatched as HF Jobs; logs stream in real time; cost requires explicit confirmation before any network call.
+- **Resume Failed Jobs:** `--resume-job` reuses an already-uploaded `frames.zip` so a credit-killed run restarts without re-uploading.
+- **Quality Presets:** Draft / Standard / Refine / High, each with a fixed flavor + iteration budget + cost estimate.
+- **Interactive Splat Viewport:** QWebEngineView + GaussianSplats3D, orbit/fly controls, axis gizmo, infinite scroll-zoom.
+- **Camera Authoring:** Walk-pattern trajectories, captured camera poses → USD time-sampled xformOps.
+- **Robot Lab (M3):** 2.5D occupancy grid from splat preview cloud, BFS geodesic field, gymnasium PointNav wrapper for SB3 PPO.
+- **Local-first OpenUSD Generation:** Every stage writes deterministic placeholder-safe USD/PLY artifacts so the pipeline can complete even without heavy tools.
+- **Fallback-safe Reconstruction:** If the remote runner fails or is unconfigured, the stage falls back to a local quick path then placeholder outputs — the job never hard-fails.
