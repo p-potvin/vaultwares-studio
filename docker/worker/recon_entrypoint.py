@@ -66,7 +66,7 @@ def vocab_tree_augment_and_remap(processed: Path, vocab_tree: Path) -> int:
         # 100 nearest-neighbour images per query is the COLMAP default; bumping
         # higher catches more loop closures at proportional CPU cost.
         "--VocabTreeMatching.num_images", "100",
-        "--SiftMatching.use_gpu", "1",
+        "--SiftMatching.use_gpu", "0",
     ])
     if result.returncode != 0:
         print(f"[recon] vocab_tree_matcher exit={result.returncode}", flush=True)
@@ -482,7 +482,7 @@ def refine_register_new_images(
         "--image_path", str(images_dir),
         "--image_list_path", str(list_path),
         "--ImageReader.single_camera", "1",
-        "--SiftExtraction.use_gpu", "1",
+        "--SiftExtraction.use_gpu", "0",
     ])
     if fe.returncode != 0:
         print(f"[refine] feature_extractor failed: exit={fe.returncode}", flush=True)
@@ -493,7 +493,7 @@ def refine_register_new_images(
     sm = run([
         "colmap", "sequential_matcher",
         "--database_path", str(database),
-        "--SiftMatching.use_gpu", "1",
+        "--SiftMatching.use_gpu", "0",
     ])
     if sm.returncode != 0:
         print(f"[refine] sequential_matcher failed: exit={sm.returncode}", flush=True)
@@ -507,7 +507,7 @@ def refine_register_new_images(
             "--database_path", str(database),
             "--VocabTreeMatching.vocab_tree_path", str(vocab_tree),
             "--VocabTreeMatching.num_images", "100",
-            "--SiftMatching.use_gpu", "1",
+            "--SiftMatching.use_gpu", "0",
         ])
         if vtm.returncode != 0:
             print(f"[refine] vocab_tree_matcher failed: exit={vtm.returncode}", flush=True)
@@ -850,11 +850,7 @@ def main() -> int:  # noqa: PLR0911, PLR0915
         "--output-dir", str(processed),
         "--matching-method", "sequential",
         "--num-downscales", "3",
-        # GPU SIFT: previously hard-coded to --no-gpu because the L4 container's
-        # COLMAP CUDA path was failing silently. Re-enabling now to see whether
-        # the current image works — CPU SIFT was costing ~5x in dollars at L4
-        # prices. Failure here is loud (process exit), unlike the silent
-        # degradation we used to see.
+        "--no-gpu"
     ])
     timings["process_data_sequential_s"] = round(time.monotonic() - started, 1)
     if process.returncode != 0:
