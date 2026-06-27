@@ -295,7 +295,8 @@ class HfJobsStageRunner(StageRunner):
             # The streaming generator yielded nothing live; fetch once post-run.
             try:
                 for line in hub.fetch_job_logs(job_id=job.id, token=token):
-                    ctx.log(f"[remote] {line}")
+                    safe_line = line.encode("ascii", "replace").decode("ascii")
+                    ctx.log(f"[remote] {safe_line}")
             except Exception as exc:  # noqa: BLE001 - logs are best-effort
                 ctx.log(f"[hf-jobs] could not fetch job logs: {exc}")
 

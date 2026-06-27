@@ -38,8 +38,10 @@ from PySide6.QtWidgets import (
     QHBoxLayout,
     QLabel,
     QListWidget,
+    QMainWindow,
     QPushButton,
     QVBoxLayout,
+    QWidget,
 )
 
 # Readable fallbacks when no translator is supplied (standalone viewer).
@@ -259,8 +261,8 @@ if WEBENGINE_AVAILABLE:
             self.viewer_flip_changed.emit(flipped)
 
 
-class ViewportTab(QFrame):
-    """Viewport tab: fly around the reconstruction, capture camera poses."""
+class ViewportWindow(QMainWindow):
+    """Standalone Viewport window: fly around the reconstruction, capture camera poses."""
 
     log = Signal(str)
 
@@ -270,16 +272,20 @@ class ViewportTab(QFrame):
         translate: Callable[[str], str] | None = None,
     ) -> None:
         super().__init__(parent=parent)
+        self.setWindowTitle("VaultWares 3D Viewport")
         self.setObjectName("Viewport")
+        
         base_translate = translate or (lambda key: key)
         self._t = lambda key: (
             value if (value := base_translate(key)) != key else _DEFAULT_STRINGS.get(key, key)
         )
         self._job_dir: Path | None = None
-        # (path_key, SceneBounds) — see _get_bounds_cached.
         self._bounds_cache: tuple | None = None
 
-        layout = QVBoxLayout(self)
+        # We need a central widget since this is now a QMainWindow
+        central = QWidget()
+        self.setCentralWidget(central)
+        layout = QVBoxLayout(central)
         layout.setContentsMargins(10, 10, 10, 10)
         layout.setSpacing(8)
 
