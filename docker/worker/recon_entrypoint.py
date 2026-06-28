@@ -476,6 +476,23 @@ def refine_register_new_images(
     # was previously broken (silent degradation), so we hard-coded use_gpu=0.
     # Re-enabling because at L4 prices CPU SIFT cost ~$1.50/refine. Failures
     # here exit non-zero, which is loud + recoverable (worst case: revert).
+    # Memory caps for cpu-upgrade (32 GB RAM). COLMAP CPU SIFT runs its own
+    # thread pool (NOT OpenMP — OMP_NUM_THREADS has zero effect here), and
+    # peak RAM is roughly num_threads * max_image_size_pixels * pyramid_factor.
+    # With defaults (num_threads=-1=auto, max_image_size=3200), 8 vCPU * full
+    # 1920x1080 SIFT = ~32-48 GB peak. Killed b2nzagaxb after 197s ($0.01).
+    # 4 threads + 1920px cap brings extractor peak to ~8-12 GB, well under 32 GB.
+    #
+    # MATCHING is a different beast: per-thread RAM is just two keypoint sets
+    # (~MB each), not full image pyramids. We can run matching at full 8 vCPU
+    # without OOM risk. Cancelled 6a40b28b81727949c74c48bb at vocab-match
+    # 387/1734 with 25s/image ⇒ 9 more hours projected; same workload at 8
+    # threads should land in ~3 hours total.
+    cpu_sift_caps = [
+        "--SiftExtraction.num_threads", "4",
+        "--SiftExtraction.max_image_size", "1920",
+    ]
+    cpu_match_caps = ["--SiftMatching.num_threads", "8"]
     fe = run([
         "colmap", "feature_extractor",
         "--database_path", str(database),
@@ -483,6 +500,7 @@ def refine_register_new_images(
         "--image_list_path", str(list_path),
         "--ImageReader.single_camera", "1",
         "--SiftExtraction.use_gpu", "0",
+        *cpu_sift_caps,
     ])
     if fe.returncode != 0:
         print(f"[refine] feature_extractor failed: exit={fe.returncode}", flush=True)
@@ -494,6 +512,7 @@ def refine_register_new_images(
         "colmap", "sequential_matcher",
         "--database_path", str(database),
         "--SiftMatching.use_gpu", "0",
+        *cpu_match_caps,
     ])
     if sm.returncode != 0:
         print(f"[refine] sequential_matcher failed: exit={sm.returncode}", flush=True)
@@ -501,13 +520,18 @@ def refine_register_new_images(
 
     # Vocab tree matcher: cross-matches new images against the whole database
     # (including the base set). This is where new + base get linked.
+    # num_images=50 (down from 100): in refine the cross-clip job is "find
+    # any sunny↔cloudy pairs that match"; 50 candidates per query is plenty
+    # because sequential already covered within-clip pairs. Cuts vocab
+    # matching wall time roughly in half.
     if vocab_tree is not None:
         vtm = run([
             "colmap", "vocab_tree_matcher",
             "--database_path", str(database),
             "--VocabTreeMatching.vocab_tree_path", str(vocab_tree),
-            "--VocabTreeMatching.num_images", "100",
+            "--VocabTreeMatching.num_images", "50",
             "--SiftMatching.use_gpu", "0",
+            *cpu_match_caps,
         ])
         if vtm.returncode != 0:
             print(f"[refine] vocab_tree_matcher failed: exit={vtm.returncode}", flush=True)
@@ -619,6 +643,14 @@ def finish_export(
 
 
 def main() -> int:  # noqa: PLR0911, PLR0915
+    # Cap OpenMP parallelism early so every subprocess we launch inherits it
+    # — COLMAP feature extraction + matching are OpenMP-parallel and saturate
+    # all 8 vCPU of cpu-upgrade by default, multiplying peak memory by 8x.
+    # 4 threads is the sweet spot: still uses most of the box, much smaller
+    # peak. Combined with --num-downscales 0 in ns-process-data this is the
+    # cpu-upgrade OOM fix (see 6a3fc7875f9c8079e0fb703c).
+    os.environ.setdefault("OMP_NUM_THREADS", "4")
+
     parser = argparse.ArgumentParser()
     parser.add_argument("--downscale", type=int, default=2)
     parser.add_argument("--train-args", default="[]", help="JSON list of ns-train args")
@@ -844,13 +876,18 @@ def main() -> int:  # noqa: PLR0911, PLR0915
         shutil.rmtree(processed)
     processed.mkdir(parents=True, exist_ok=True)
     started = time.monotonic()
+    # --num-downscales 0 skips the 1x/2x/4x/8x image pyramid that ns-process-data
+    # would otherwise build. splatfacto uses one downscale level (chosen via the
+    # dataparser CLI on the train side), so the extra sizes are dead weight AND
+    # the parallel pool that builds them was peaking RAM hard enough to OOMKill
+    # cpu-upgrade on a 500-frame run (exit 137 on 6a3fc7875f9c8079e0fb703c).
     process = run([
         "ns-process-data", "images",
         "--data", str(images),
         "--output-dir", str(processed),
         "--matching-method", "sequential",
-        "--num-downscales", "3",
-        "--no-gpu"
+        "--num-downscales", "0",
+        "--no-gpu",
     ])
     timings["process_data_sequential_s"] = round(time.monotonic() - started, 1)
     if process.returncode != 0:
