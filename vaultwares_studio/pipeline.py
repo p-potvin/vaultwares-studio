@@ -551,11 +551,27 @@ class DigitalTwinStudioRunner:
             duration = float(intake.metadata["probe"]["format"]["duration"])
         except (KeyError, TypeError, ValueError):
             pass
-        fps = compute_extraction_fps(duration, target_frames=FRAME_EXTRACT_TARGET)
-        self.log(
-            f"Sampling at {fps} fps (duration: {duration or 'unknown'}s); "
-            f"keeping the sharpest ~{FRAME_KEEP_TARGET} frames"
-        )
+        # Lab-mode override: aim for preset.frame_cap (no sharpness prune
+        # afterwards). Production path keeps the FRAME_EXTRACT_TARGET +
+        # FRAME_KEEP_TARGET (sharpest-N) behaviour.
+        preset = get_preset(self.manifest.metadata.get("preset"))
+        if preset.unrestricted_frames and preset.frame_cap > 0:
+            extract_target = preset.frame_cap
+            keep_target = preset.frame_cap
+        else:
+            extract_target = FRAME_EXTRACT_TARGET
+            keep_target = FRAME_KEEP_TARGET
+        fps = compute_extraction_fps(duration, target_frames=extract_target)
+        if preset.unrestricted_frames:
+            self.log(
+                f"Sampling at {fps} fps (duration: {duration or 'unknown'}s); "
+                f"lab mode — no sharpness prune, hard-cap {preset.frame_cap}"
+            )
+        else:
+            self.log(
+                f"Sampling at {fps} fps (duration: {duration or 'unknown'}s); "
+                f"keeping the sharpest ~{keep_target} frames"
+            )
         cmd = [
             ffmpeg,
             "-y",
@@ -570,7 +586,18 @@ class DigitalTwinStudioRunner:
         self._run_command(cmd, "Frame extraction failed.", timeout_seconds=1800)
         extracted_count = len(list_frames(self.frames_dir))
         kept_count = extracted_count
-        if extracted_count > FRAME_KEEP_TARGET:
+        if preset.unrestricted_frames:
+            # Hard cap: keep the FIRST preset.frame_cap frames in name order
+            # (temporal order, since ffmpeg numbers sequentially). No sharpness
+            # prune — the whole point of lab mode is feeding COLMAP an undensified
+            # set so we can see what falls out.
+            if preset.frame_cap > 0 and extracted_count > preset.frame_cap:
+                for stale in list_frames(self.frames_dir)[preset.frame_cap:]:
+                    stale.unlink(missing_ok=True)
+                extracted_count = preset.frame_cap
+                kept_count = preset.frame_cap
+                self.log(f"Lab mode: hard-capped to {preset.frame_cap} frames (no sharpness prune).")
+        elif extracted_count > FRAME_KEEP_TARGET:
             try:
                 from .frame_selection import prune_to_sharpest
 
@@ -867,16 +894,28 @@ class DigitalTwinStudioRunner:
 
         # processed_min.zip from the SfM job is the only expected output for Job A.
         sfm_processed_out = remote_out_dir / "sfm_processed_min.zip"
+        # Preset can override both the worker image (lab Space) and the SfM
+        # timeout (lab runs need 12h ceilings, not the default est*4). Image
+        # override may contain {owner}; resolve it against the runner's image.
+        sfm_image = image_name
+        if preset.sfm_image_override:
+            owner = image_name.split("/")[-2] if "/" in image_name else ""
+            sfm_image = preset.sfm_image_override.format(owner=owner)
+        sfm_timeout = (
+            preset.sfm_timeout_seconds
+            if preset.sfm_timeout_seconds > 0
+            else int(max(3600, preset.sfm_est_minutes * 60 * 4))
+        )
         sfm_ctx = StageContext(
             job_dir=self.root,
             job_id=hf_job_id,
             stage_key="reconstruction_sfm",
             params={
-                "image": image_name,
+                "image": sfm_image,
                 "image_has_hub": True,
                 "flavor": preset.sfm_flavor,
                 "est_minutes": preset.sfm_est_minutes,
-                "timeout_seconds": int(max(3600, preset.sfm_est_minutes * 60 * 4)),
+                "timeout_seconds": sfm_timeout,
                 "command": sfm_command,
                 "extra_repo_inputs": sfm_extra_inputs,
             },
@@ -911,7 +950,18 @@ class DigitalTwinStudioRunner:
             "--train-args", _json.dumps(preset.train_args()),
             "--keep-checkpoint",
         ]
-        train_extra_inputs = [f"{sfm_out_prefix}/processed_min.zip"]
+        # Job B needs three things in VW_IN:
+        #   processed_min.zip  — Job A's SfM output (transforms.json, sparse model, db)
+        #   frames.zip         — the actual images, since processed_min.zip doesn't
+        #                        contain them and ns-train's nerfstudio-data parser
+        #                        reads file_path entries relative to --data processed
+        #   model.zip          — only when refining: base checkpoint for --load-dir
+        # vw_stage.py moves each extra to in_dir/<basename>, so the worker sees
+        # frames.zip + processed_min.zip side by side.
+        train_extra_inputs = [
+            f"{sfm_out_prefix}/processed_min.zip",
+            f"jobs/{hf_job_id}/reconstruction_sfm/in/frames.zip",
+        ]
         if refine_from:
             base_prefix = f"jobs/{refine_from}/reconstruction/out"
             train_extra_inputs.append(f"{base_prefix}/model.zip")

@@ -655,6 +655,20 @@ def main() -> int:  # noqa: PLR0911, PLR0915
     parser.add_argument("--downscale", type=int, default=2)
     parser.add_argument("--train-args", default="[]", help="JSON list of ns-train args")
     parser.add_argument("--keep-checkpoint", action="store_true")
+    # Lab knobs (also safe in prod): reduce vocab-tree candidates per query
+    # and the SIFT image size cap. Defaults preserve historical behaviour.
+    parser.add_argument(
+        "--vocab-tree-num-images",
+        type=int,
+        default=50,
+        help="VocabTreeMatching.num_images (lower = faster matching, fewer loop closures).",
+    )
+    parser.add_argument(
+        "--sift-max-image-size",
+        type=int,
+        default=1280,
+        help="SiftExtraction.max_image_size (lower = faster extract + fewer keypoints).",
+    )
     parser.add_argument(
         "--refine-mode",
         action="store_true",
@@ -726,8 +740,16 @@ def main() -> int:  # noqa: PLR0911, PLR0915
             shutil.move(str(processed / "colmap_database.db"), str(processed / "colmap" / "database.db"))
         if (processed / "sparse").exists() and not (processed / "colmap" / "sparse").exists():
             shutil.move(str(processed / "sparse"), str(processed / "colmap" / "sparse"))
-        # Build images/ from the frames.zip (same as standard mode).
-        print(f"[train-only] {frame_count} frames, dataset unpacked", flush=True)
+        # Move the just-extracted frames into processed/images/ so ns-train's
+        # nerfstudio-data dataparser finds them via the "images/frame_XXX.jpg"
+        # paths inside transforms.json. In standard mode ns-process-data did
+        # this copy itself; in train-only ns-process-data never runs, so we
+        # mirror its placement manually.
+        processed_images = processed / "images"
+        if not processed_images.exists() and images.exists():
+            shutil.move(str(images), str(processed_images))
+            images.mkdir(parents=True, exist_ok=True)
+        print(f"[train-only] {frame_count} frames, dataset unpacked, images at {processed_images}", flush=True)
 
         load_dir: Path | None = None
         if args.refine_mode:
@@ -876,22 +898,109 @@ def main() -> int:  # noqa: PLR0911, PLR0915
         shutil.rmtree(processed)
     processed.mkdir(parents=True, exist_ok=True)
     started = time.monotonic()
-    # --num-downscales 0 skips the 1x/2x/4x/8x image pyramid that ns-process-data
-    # would otherwise build. splatfacto uses one downscale level (chosen via the
-    # dataparser CLI on the train side), so the extra sizes are dead weight AND
-    # the parallel pool that builds them was peaking RAM hard enough to OOMKill
-    # cpu-upgrade on a 500-frame run (exit 137 on 6a3fc7875f9c8079e0fb703c).
-    process = run([
+    # Direct COLMAP SfM (bypassing ns-process-data) — required to pass thread
+    # and image-size caps that prevent OOMKill on cpu-upgrade. ns-process-data
+    # internally invokes `colmap feature_extractor` with default num_threads
+    # (= hardware concurrency = 8 vCPU) and default max_image_size (3200), and
+    # doesn't expose --SiftExtraction.* flags. 8 threads × full-res SIFT pyramid
+    # = ~28+ GB peak, exceeding cpu-upgrade's 32 GB on 500-frame stitched runs.
+    # taskset -c 0-3 didn't help: std::thread::hardware_concurrency() returns
+    # actual core count, not affinity mask, so threads still spawned and
+    # allocated. We mirror the direct-COLMAP pattern from refine mode here.
+    #
+    # OOMKilled chain: 6a3fc7875f9c8079e0fb703c (ns-process-data default),
+    # 6a42b7d15f9c8079e0fb9e25 (--num-downscales 0 added), 6a42bac381727949c74c57e9
+    # (taskset added — didn't help). This rewrite is the proper fix.
+    images_dir = processed / "images"
+    images_dir.mkdir(parents=True, exist_ok=True)
+    for img in images.iterdir():
+        if img.suffix.lower() in (".jpg", ".png"):
+            shutil.copy(img, images_dir / img.name)
+    colmap_dir = processed / "colmap"
+    colmap_dir.mkdir(parents=True, exist_ok=True)
+    db_path = colmap_dir / "database.db"
+
+    # 1. Feature extraction (capped threads + capped image size).
+    fe = run([
+        "colmap", "feature_extractor",
+        "--database_path", str(db_path),
+        "--image_path", str(images_dir),
+        "--ImageReader.single_camera", "1",
+        "--ImageReader.camera_model", "OPENCV",
+        "--SiftExtraction.use_gpu", "0",
+        "--SiftExtraction.num_threads", "4",
+        "--SiftExtraction.max_image_size", str(args.sift_max_image_size),
+    ])
+    if fe.returncode != 0:
+        return fail(out_dir, "process_data_failed", f"feature_extractor exit {fe.returncode}")
+    # Archive db immediately so a downstream failure still ships diagnostics.
+    if db_path.exists():
+        try:
+            shutil.copyfile(db_path, out_dir / "colmap_database.db")
+        except Exception as exc:  # noqa: BLE001
+            print(f"[recon] early db archive failed: {exc}", flush=True)
+
+    # 2. Sequential matching (matcher RAM per thread is small, full 8 threads).
+    sm = run([
+        "colmap", "sequential_matcher",
+        "--database_path", str(db_path),
+        "--SiftMatching.use_gpu", "0",
+        "--SiftMatching.num_threads", "8",
+    ])
+    if sm.returncode != 0:
+        return fail(out_dir, "process_data_failed", f"sequential_matcher exit {sm.returncode}")
+
+    # 2b. Vocab-tree matching — ALWAYS, not just on threshold fail. Sequential
+    # only pairs temporally-adjacent frames; vocab tree finds visually-similar
+    # pairs anywhere in the timeline. Critical for stitched / multi-clip inputs
+    # where temporally-adjacent frames at stitch boundaries aren't spatially
+    # adjacent. Cost at 500 frames + num_images=50 + 8 threads ≈ 10-20 min;
+    # restored ~30% registration on local-run-20260629-144053 (53% → likely
+    # 80%+ if this had been on for that run).
+    vocab_tree_path = ensure_vocab_tree()
+    if vocab_tree_path is not None:
+        vtm_started = time.monotonic()
+        vtm = run([
+            "colmap", "vocab_tree_matcher",
+            "--database_path", str(db_path),
+            "--VocabTreeMatching.vocab_tree_path", str(vocab_tree_path),
+            "--VocabTreeMatching.num_images", str(args.vocab_tree_num_images),
+            "--SiftMatching.use_gpu", "0",
+            "--SiftMatching.num_threads", "8",
+        ])
+        timings["vocab_tree_match_s"] = round(time.monotonic() - vtm_started, 1)
+        if vtm.returncode != 0:
+            print(f"[recon] vocab_tree_matcher non-fatal failure: exit={vtm.returncode}", flush=True)
+
+    # 3. Mapper (single model — multiple_models=0 to keep it simple). Writes
+    # to colmap/sparse/0/.
+    sparse_root = colmap_dir / "sparse"
+    sparse_root.mkdir(parents=True, exist_ok=True)
+    mp = run([
+        "colmap", "mapper",
+        "--database_path", str(db_path),
+        "--image_path", str(images_dir),
+        "--output_path", str(sparse_root),
+        "--Mapper.multiple_models", "0",
+    ])
+    if mp.returncode != 0:
+        # Don't fail yet — retry_mapper below tries init-pair smart picks.
+        print(f"[recon] initial mapper failed (exit {mp.returncode}); retry_mapper will try smart init pairs", flush=True)
+
+    # 4. Convert COLMAP sparse model → transforms.json + sparse_pc.ply via
+    # ns-process-data with --skip-colmap (its dataparser writer; we keep the
+    # nerfstudio output format consistent with refine mode's regen step).
+    regen = run([
         "ns-process-data", "images",
-        "--data", str(images),
+        "--data", str(images_dir),
         "--output-dir", str(processed),
-        "--matching-method", "sequential",
-        "--num-downscales", "0",
-        "--no-gpu",
+        "--skip-colmap",
+        "--skip-image-processing",
+        "--colmap-model-path", "colmap/sparse/0",
     ])
     timings["process_data_sequential_s"] = round(time.monotonic() - started, 1)
-    if process.returncode != 0:
-        return fail(out_dir, "process_data_failed", f"ns-process-data exit {process.returncode}")
+    if regen.returncode != 0 and mp.returncode != 0:
+        return fail(out_dir, "process_data_failed", f"mapper exit {mp.returncode}, regen exit {regen.returncode}")
     registered = count_registered_images(processed)
     matching_used = "sequential"
     stats = colmap_db_stats(processed)

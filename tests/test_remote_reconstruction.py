@@ -251,6 +251,19 @@ def test_split_job_routes_sfm_to_cpu_and_training_to_gpu():
     assert train_ctx.stage_key == "reconstruction"
     assert "--train-only" in train_ctx.params["command"]
     assert train_ctx.skip_inputs_upload is True  # training job never uploads local files
+    # Job B has inputs=[]; it must pull frames.zip + processed_min.zip via
+    # extra_repo_inputs. Worker main() unconditionally requires frames.zip in
+    # VW_IN, AND the train-only path needs the images so nerfstudio-data's
+    # dataparser can resolve the "images/frame_XXX.jpg" entries in
+    # transforms.json. Missing either fails Job B before any GPU time burns.
+    train_extras = train_ctx.params.get("extra_repo_inputs", [])
+    assert any(p.endswith("/processed_min.zip") for p in train_extras), (
+        "Job B is missing processed_min.zip in extra_repo_inputs"
+    )
+    assert any(p.endswith("/frames.zip") for p in train_extras), (
+        "Job B is missing frames.zip in extra_repo_inputs — worker would fail "
+        "at the unconditional frames.zip check in main()"
+    )
 
 
 def test_split_job_preset_cost_is_combined():

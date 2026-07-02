@@ -12,18 +12,31 @@ FROM ghcr.io/nerfstudio-project/nerfstudio:latest
 
 USER root
 ENV PYTHONUNBUFFERED=1
-# Drop a sitecustomize.py that turns on TF32 matmul before any user code
-# starts — PyTorch doesn't have an env var for this, only the Python call.
-# L4 is Ampere; TF32 buys ~2x FP32 matmul throughput with negligible quality
-# loss for splatfacto. This fires for every Python process in the container.
-RUN SITEPKG=$(python3 -c "import site; print(site.getsitepackages()[0])") \
-    && printf '%s\n' \
-        'try:' \
-        '    import torch' \
-        "    torch.set_float32_matmul_precision('high')" \
-        'except Exception:' \
-        '    pass' \
-        > "$SITEPKG/sitecustomize.py"
+# Drop a sitecustomize.py into every plausible site-packages location so that
+# whichever one Python's site module actually imports from, it picks ours up.
+# Prior version only wrote to getsitepackages()[0]; the TF32 warning kept
+# appearing in training logs, meaning that path wasn't on sys.path at startup.
+# Belt-and-braces approach: enumerate all candidate dirs and write to each.
+# sitecustomize.py runs before any user code — sets TF32=high on Ampere+ GPUs
+# (~2x FP32 matmul speedup on L4 with negligible accuracy loss for splatfacto).
+RUN python3 -c "import site; \
+        print(' '.join(site.getsitepackages() + [site.getusersitepackages()]))" \
+        > /tmp/sitedirs.txt \
+    && for d in $(cat /tmp/sitedirs.txt) \
+                /usr/local/lib/python3.10/dist-packages \
+                /usr/lib/python3/dist-packages \
+                /usr/lib/python3.10/dist-packages; do \
+            if [ -d "$d" ]; then \
+                printf '%s\n' \
+                    'try:' \
+                    '    import torch' \
+                    "    torch.set_float32_matmul_precision('high')" \
+                    'except Exception:' \
+                    '    pass' \
+                    > "$d/sitecustomize.py" \
+                && echo "[Dockerfile] wrote sitecustomize.py to $d"; \
+            fi; \
+        done
 # CuDNN's runtime-compiled kernel selection wants libnvrtc.so. Without it,
 # splatfacto.py applies a workaround that picks slower kernel paths. The
 # matching CUDA version comes from the base nerfstudio image; we install the
