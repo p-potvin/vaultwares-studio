@@ -106,6 +106,60 @@ frames. **That number is also the cheapest available test of the streaming
 pipeline's suspected global-scale problem** — the thing most likely to explain
 "only two good standing spots" — and it costs no GPU time.
 
+## First real run: blocked, and two of my own bugs on the way
+
+> Added after running it against the live depth job.
+
+The DA3 depth job succeeded (`depths.zip`, 80 maps at 504x280, ~$0.13, banked in
+the artifact dataset and reusable). The fusion did not, and the two numbers it
+printed are **artifacts of this pipeline, not measurements of DA3**. Recording
+them so nobody cites them later:
+
+| run | frames aligned | scale_spread | what was actually wrong |
+|---|---|---|---|
+| first | 23 / 42 | 630% | no visibility — see below |
+| second | 3 / 42 | 1504% | visibility from the wrong COLMAP run |
+
+**Bug 1: no visibility.** The first version projected all 185,355 sparse points
+into every frame and left the Huber loss to reject occluded ones. Measured, the
+median frame has **45,966** points projecting into it and COLMAP's own tracks
+say it saw **577** — ~98.7% occluded. That is not a tail an M-estimator can
+absorb; it is the entire population, so the fit described the occluders.
+Correlation between DA3's depth and the "true" depth ran +0.60 to -0.10 across
+frames, which is the tell. Fixed by `colmap_model.py`, which reads the tracks
+out of `points3D.bin`.
+
+**Bug 2: the models on disk do not go together.** Confirmed from the raw
+binary headers:
+
+| artifact | images | points |
+|---|---:|---:|
+| bundle `processed_min.zip` → `transforms.json` | **491** | — |
+| bundle `processed_min.zip` → `sparse/` | **10** | 2,325 |
+| bundle `processed_min.zip` → `sparse_pc.ply` | — | 185,355 |
+| `colmap-project/.../sparse/0` | 487 | 49,107 |
+| `colmap-project/.../sparse/1` | 10 | 933 |
+
+The bundle ships a **10-image fragment** as its sparse model, not the model
+behind its own 491 poses. And `colmap-project` is a *separate reconstruction* of
+the same video — different point counts, and its bounding box does not agree
+with `sparse_pc.ply` even after `applied_transform`. COLMAP's gauge is arbitrary
+per run, so using one run's visibility against another run's poses is
+meaningless. That is what produced 1504%.
+
+**So the hybrid cannot be measured with what is on disk.** It needs one
+self-consistent COLMAP bundle: transforms, points, and tracks from the same run.
+Nothing here is that.
+
+The fix is to re-run COLMAP on `backyard_134s_sunny.mp4` and retain the full
+`sparse/0` alongside the transforms — local, free, ~2442 s of sequential
+matching measured on 14 June. That also *improves* coverage: DA3's 80 frames
+overlapped only 42 of the bundle's posed frames, and a fresh run over the same
+`frames.zip` should register nearly all 500.
+
+Until then `scale_spread` is unmeasured. It is still the right decision metric;
+we simply do not have a trustworthy value for it yet.
+
 ## Deferred, deliberately
 
 Both of these are real and probably worth doing; they are parked so the hybrid

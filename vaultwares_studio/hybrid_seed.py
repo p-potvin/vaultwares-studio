@@ -32,14 +32,22 @@ diagnostic: if the shift is doing real work, DA3's depth is relative rather than
 metric on this scene, and that is worth knowing before trusting it anywhere
 else.
 
-**Robust, because the correspondences lie.** A sparse point that projects into
-a frame is not necessarily *visible* in it -- it can sit behind a wall. Using
-COLMAP's tracks would filter those, but tracks are incomplete too (a point is
-tracked in the frames its matcher linked, not every frame that sees it), and
-the failure is one-sided: occluded points always read too far. Iteratively
-reweighted least squares with a Huber loss handles a one-sided outlier tail
-without needing to identify it, which is why the fit is robust rather than a
-plain lstsq.
+**Visibility, then robustness -- in that order.** A sparse point that projects
+into a frame is not necessarily *visible* in it; it can sit behind a wall, and
+an occluded point always reads too far. The first version of this module
+projected the whole cloud into every frame and left a Huber loss to reject the
+rest. That does not work, and the measurement says why: on the June 14 backyard
+bundle the median frame has **45,966** points projecting into it and COLMAP's
+own tracks say it saw **577**. The occluded fraction is ~98.7% -- not a tail an
+M-estimator can absorb but the entire population, so the fit described the
+occluders. It produced per-frame scales spread over 630%, correlations between
+predicted and "true" depth ranging +0.60 to -0.10, and half the frames failing
+to align at all. None of that was about the depth predictor.
+
+So correspondences now come from ``colmap_model.read_sparse_model`` -- the
+points COLMAP's matcher actually verified in each frame. The Huber loss stays,
+because even a verified track can be mismatched, but it is now cleaning up a
+genuine tail rather than being asked to find the signal.
 """
 
 from __future__ import annotations
@@ -97,11 +105,15 @@ class DepthAlignment:
 
 
 # Below this the fit is not constrained enough to trust. Measured against the
-# June 14 COLMAP bundle for backyard_134s_sunny.mp4 (185,355 points, 491
-# frames), the median frame has 45,966 sparse points projecting into it and the
-# worst has 6,089 — every frame clears this by three orders of magnitude. The
-# threshold is therefore not a tuning knob but a guard against the degenerate
-# case: a frame of nothing but sky, or a pose that has come out wrong.
+# June 14 COLMAP model for backyard_134s_sunny.mp4 (sparse/0: 49,107 points,
+# 487 registered frames), the median frame has 577 VERIFIED observations and the
+# worst has 36. So a typical frame clears this comfortably while a genuinely
+# weak one — sky, a blank wall, a pose that came out wrong — does not, which is
+# the whole job of the threshold. It is a guard, not a tuning knob.
+#
+# (An earlier revision cited 45,966 here. That was the count from projecting the
+#  entire cloud, ~98.7% of which is occluded in any given frame, and using it
+#  was the bug this threshold could not have caught.)
 MIN_CORRESPONDENCES = 24
 
 
@@ -333,7 +345,10 @@ def build_hybrid_seed(
     """Fuse per-frame predicted depth into one cloud in COLMAP's world.
 
     Each entry of ``frames`` is ``{"depth", "intrinsics", "c2w", ...}`` with
-    optional ``"colors"`` and ``"confidence"``. ``intrinsics`` is the 3x3 in the
+    optional ``"colors"``, ``"confidence"`` and ``"sparse_points"`` -- the last
+    being the points COLMAP verified in THAT frame, which is what makes the
+    alignment meaningful. ``sparse_points`` (the argument) is the fallback for
+    frames that do not carry their own, and is materially worse. ``intrinsics`` is the 3x3 in the
     DEPTH map's resolution, which is not the training resolution -- DA3 works
     small and splatfacto loads the originals.
 
@@ -347,8 +362,15 @@ def build_hybrid_seed(
     colour_chunks: list[np.ndarray] = []
 
     for frame in frames:
+        # Per-frame visibility when the caller has COLMAP's tracks; the whole
+        # cloud only as a fallback, which is known to be far worse -- see the
+        # module docstring.
+        visible = frame.get("sparse_points")
         alignment = align_depth_to_sparse(
-            frame["depth"], frame["intrinsics"], frame["c2w"], sparse_points
+            frame["depth"],
+            frame["intrinsics"],
+            frame["c2w"],
+            sparse_points if visible is None else visible,
         )
         alignments.append(alignment)
         if not alignment.ok:

@@ -35,6 +35,7 @@ import numpy as np
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
 
+from vaultwares_studio.colmap_model import read_sparse_model  # noqa: E402
 from vaultwares_studio.hybrid_seed import build_hybrid_seed  # noqa: E402
 from vaultwares_studio.splat_io import read_point_ply, write_point_ply  # noqa: E402
 
@@ -50,7 +51,8 @@ def unpack(source: Path, work: Path) -> Path:
     return target
 
 
-def load_frames(transforms: dict, depths_dir: Path, colors_dir: Path | None) -> list[dict]:
+def load_frames(transforms: dict, depths_dir: Path, colors_dir: Path | None,
+                model=None) -> list[dict]:
     """Pair each posed frame with its depth map.
 
     DA3 writes depth named after the source frame's stem, so the join is by
@@ -86,6 +88,10 @@ def load_frames(transforms: dict, depths_dir: Path, colors_dir: Path | None) -> 
             "c2w": np.array(entry["transform_matrix"], dtype=np.float64),
             "stem": stem,
         }
+        if model is not None:
+            # The points COLMAP's matcher verified in THIS frame. Without this
+            # the alignment fits occluded geometry — see hybrid_seed's docstring.
+            frame["sparse_points"] = model.points_seen_by(entry["file_path"])
         conf_path = depths_dir.parent / "confidence" / f"{stem}.npy"
         if conf_path.exists():
             frame["confidence"] = np.load(conf_path)
@@ -110,6 +116,11 @@ def main() -> int:
     parser.add_argument("--colors", type=Path,
                         help="Optional directory of matching RGB .npy arrays")
     parser.add_argument("--out", required=True, type=Path)
+    parser.add_argument("--sparse-model", type=Path,
+                        help="COLMAP binary sparse dir (sparse/0) carrying per-frame "
+                             "visibility. Strongly recommended: without it every point is "
+                             "projected into every frame and ~99%% of the correspondences "
+                             "are occluded, which fits the occluders instead of the surface.")
     parser.add_argument("--stride", type=int, default=2,
                         help="Pixel stride when back-projecting (2 = a quarter of the pixels)")
     parser.add_argument("--keep-quantile", type=float, default=0.6,
@@ -140,7 +151,17 @@ def main() -> int:
         print(f"[hybrid] COLMAP: {len(transforms['frames'])} posed frames, "
               f"{len(sparse_points):,} triangulated points")
 
-        frames = load_frames(transforms, args.depths, args.colors)
+        model = None
+        if args.sparse_model:
+            model = read_sparse_model(args.sparse_model)
+            counts = [len(v) for v in model.visible.values()]
+            print(f"[hybrid] visibility: {len(model.xyz):,} points over "
+                  f"{len(model.visible)} frames, median {int(np.median(counts)):,} seen per frame")
+        else:
+            print("[hybrid] WARNING: no --sparse-model; falling back to projecting the whole "
+                  "cloud into every frame. Measured ~98.7% of those correspondences are "
+                  "occluded and the resulting alignment is not trustworthy.")
+        frames = load_frames(transforms, args.depths, args.colors, model)
         if not frames:
             print("[hybrid] no frame had both a pose and a depth map", file=sys.stderr)
             return 1
