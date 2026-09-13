@@ -142,6 +142,56 @@ def read_point_cloud_as_splat(path: Path, *, point_scale: float = 0.01) -> Gauss
     )
 
 
+def read_point_ply(path: Path) -> tuple[np.ndarray, np.ndarray]:
+    """A plain XYZ+RGB cloud as ``(positions float64, colors uint8)``.
+
+    Distinct from ``read_point_cloud_as_splat``, which synthesizes gaussian
+    fields for rendering. The seed-cloud path wants the geometry as geometry —
+    colours as the 0..255 integers the format stores, not normalised floats
+    round-tripped through spherical harmonics.
+
+    COLMAP writes ``sparse_pc.ply`` as ASCII and DA3 writes binary; plyfile
+    reads both, which is why this does not hand-roll a parser.
+    """
+    from plyfile import PlyData
+
+    vertex = PlyData.read(str(path))["vertex"]
+    names = {prop.name for prop in vertex.properties}
+    if not {"x", "y", "z"} <= names:
+        raise ValueError(f"{path} is missing x/y/z point properties.")
+    positions = np.stack(
+        [np.asarray(vertex[name], dtype=np.float64) for name in ("x", "y", "z")], axis=1
+    )
+    for triple in (("red", "green", "blue"), ("r", "g", "b")):
+        if set(triple) <= names:
+            colors = np.stack([np.asarray(vertex[name]) for name in triple], axis=1)
+            if colors.dtype.kind == "f" and colors.max(initial=0.0) <= 1.0:
+                colors = colors * 255.0
+            return positions, np.clip(colors, 0, 255).astype(np.uint8)
+    return positions, np.full((len(positions), 3), 200, dtype=np.uint8)
+
+
+def write_point_ply(positions: np.ndarray, colors: np.ndarray, path: Path) -> Path:
+    """Write the XYZ+RGB cloud nerfstudio's dataparser reads as ``ply_file_path``."""
+    from plyfile import PlyData, PlyElement
+
+    positions = np.asarray(positions, dtype=np.float32).reshape(-1, 3)
+    colors = np.asarray(colors, dtype=np.uint8).reshape(-1, 3)
+    if len(colors) != len(positions):
+        raise ValueError(f"{len(positions)} positions but {len(colors)} colors")
+
+    rows = np.empty(
+        len(positions),
+        dtype=[("x", "f4"), ("y", "f4"), ("z", "f4"),
+               ("red", "u1"), ("green", "u1"), ("blue", "u1")],
+    )
+    rows["x"], rows["y"], rows["z"] = positions.T
+    rows["red"], rows["green"], rows["blue"] = colors.T
+    path.parent.mkdir(parents=True, exist_ok=True)
+    PlyData([PlyElement.describe(rows, "vertex")]).write(str(path))
+    return path
+
+
 def write_gaussian_ply(splat: GaussianSplat, path: Path) -> None:
     from plyfile import PlyData, PlyElement
 
