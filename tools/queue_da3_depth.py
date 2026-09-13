@@ -60,6 +60,11 @@ def main() -> int:
     parser.add_argument("--da3-model", default=None,
                         help="Overrides the preset's model")
     parser.add_argument("--flavor", action="append")
+    parser.add_argument("--scheduling-timeout", type=float, default=900.0,
+                        help="Seconds to wait for a flavor to leave SCHEDULING before "
+                             "trying the next. The runner's 120s default is optimistic — "
+                             "l4x1 has been measured at 20+ min in SCHEDULING, and a "
+                             "cancelled job costs nothing, so patience is free.")
     parser.add_argument("--yes", action="store_true", help="approve the job cost")
     args = parser.parse_args()
 
@@ -102,7 +107,8 @@ def main() -> int:
 
     estimate = preset.sfm_cost()
     print(f"[da3-depth] image={image} flavor={args.flavor or preset.sfm_flavor}")
-    print(f"[da3-depth] est {preset.sfm_est_minutes:.0f} min, ~${estimate.est_usd:.2f}")
+    print(f"[da3-depth] est {preset.sfm_est_minutes:.0f} min, ~${estimate.est_usd:.2f}; "
+          f"waiting up to {args.scheduling_timeout:.0f}s per flavor for spot capacity")
     if not args.yes:
         print("[da3-depth] not submitting — pass --yes to approve the cost.")
         return 0
@@ -123,6 +129,7 @@ def main() -> int:
             "timeout_seconds": preset.sfm_timeout_seconds or 3600,
             "command": command,
             "extra_repo_inputs": [],
+            "flavor_scheduling_timeout_seconds": args.scheduling_timeout,
         },
         inputs=[args.frames],
         # depths.zip is the point of this job. processed_min.zip comes along and
