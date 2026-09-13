@@ -1,6 +1,7 @@
 import sys
 import os
 
+import gui  # Initializes USD before QtWebEngine (Windows DLL load ordering).
 from PySide6.QtWidgets import QApplication
 from PySide6.QtGui import QFont
 

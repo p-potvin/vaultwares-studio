@@ -97,6 +97,7 @@ _STRINGS: dict[str, dict[str, str]] = {
     "viewport_reload":       {"EN": "Reload Scene",                              "QC": "Recharger la scène"},
     "viewport_capture":      {"EN": "Capture Camera",                            "QC": "Capturer la caméra"},
     "viewport_loading":      {"EN": "Loading reconstruction…",                   "QC": "Chargement de la reconstruction…"},
+    "viewport_converting_point_cloud": {"EN": "Preparing point cloud for viewer…", "QC": "Préparation du nuage de points pour la visionneuse…"},
     "viewport_no_scene":     {"EN": "No reconstruction yet — run a job, then reload.",
                               "QC": "Aucune reconstruction — exécutez un travail, puis rechargez."},
     "viewport_no_webengine": {"EN": "QtWebEngine is unavailable on this system. Use the Open Live 3D Viewer button instead.",

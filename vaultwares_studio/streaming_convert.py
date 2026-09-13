@@ -74,6 +74,61 @@ def load_streaming_poses(stream_dir: Path) -> tuple[np.ndarray, np.ndarray]:
     return poses, intrinsics
 
 
+def infer_stream_size(
+    stream_dir: Path, fallback: tuple[int, int] | None = None
+) -> tuple[int, int]:
+    """The pixel frame DA3-Streaming's intrinsics are expressed in.
+
+    This is NOT necessarily the size of the frames it was fed. DA3 resizes its
+    input to its own working resolution before inference (504 wide for the
+    LARGE model), and ``intrinsic.txt`` comes back in that frame. Feeding
+    672x378 and scaling the intrinsics as if they were 672-wide put the
+    principal point of every September run at (720, 400) on a 1920x1080 image
+    and shortened the focal length by 25% — measured on the IMG_1274 artifact,
+    where the retained ``results_output/*.npz`` images are 280x504.
+
+    Resolution comes from, in order: the retained npz image shape, the
+    principal point (DA3 centres it exactly, so cx*2 by cy*2), then the
+    supplied fallback.
+    """
+    results = stream_dir / "results_output"
+    if results.is_dir():
+        for candidate in sorted(results.glob("*.npz"))[:1]:
+            with np.load(candidate) as data:
+                for key in ("image", "depth", "conf"):
+                    if key in data.files:
+                        height, width = data[key].shape[:2]
+                        return int(width), int(height)
+    intr_path = stream_dir / "intrinsic.txt"
+    if intr_path.exists():
+        intrinsics = np.loadtxt(intr_path, dtype=np.float64)
+        if intrinsics.ndim == 1:
+            intrinsics = intrinsics[None, :]
+        cx, cy = float(np.median(intrinsics[:, 2])), float(np.median(intrinsics[:, 3]))
+        if cx > 0 and cy > 0:
+            return int(round(2 * cx)), int(round(2 * cy))
+    if fallback is None:
+        raise FileNotFoundError(f"cannot infer the DA3-Streaming working resolution from {stream_dir}")
+    return fallback
+
+
+def validate_principal_point(
+    intrinsics: np.ndarray, stream_size: tuple[int, int], *, tolerance: float = 0.1
+) -> None:
+    """Refuse intrinsics whose principal point is not near the centre of the
+    frame they are claimed to be in — the symptom of a wrong ``stream_size``."""
+    width, height = stream_size
+    cx, cy = float(np.median(intrinsics[:, 2])), float(np.median(intrinsics[:, 3]))
+    if cx <= 0 or cy <= 0:
+        return  # synthetic fixtures; nothing to check
+    if abs(cx - width / 2) > tolerance * width or abs(cy - height / 2) > tolerance * height:
+        raise ValueError(
+            f"principal point ({cx:.0f}, {cy:.0f}) is not centred in a {width}x{height} frame; "
+            "the intrinsics are in a different resolution than stream_size claims "
+            "(DA3 resizes internally — use infer_stream_size)"
+        )
+
+
 def validate_poses(poses: np.ndarray, *, rtol: float = 1e-3) -> None:
     """Fail loudly on malformed pose matrices.
 
@@ -112,6 +167,7 @@ def streaming_to_transforms(
     """
     poses, intrinsics = load_streaming_poses(stream_dir)
     validate_poses(poses)
+    validate_principal_point(intrinsics, stream_size)
 
     if len(image_names) != len(poses):
         raise ValueError(
@@ -156,10 +212,14 @@ def write_processed_bundle(
     image_names: list[str],
     output_dir: Path,
     *,
-    stream_size: tuple[int, int],
+    stream_size: tuple[int, int] | None,
     original_size: tuple[int, int],
 ) -> tuple[Path, Path]:
     """Write transforms.json + sparse_pc.ply into ``output_dir``.
+
+    ``stream_size`` is the frame the intrinsics are in. Pass ``None`` (or the
+    size the frames were fed at, which is only a fallback) and it is inferred
+    from the streaming outputs — see ``infer_stream_size``.
 
     The point cloud is copied straight across: streaming already applies its own
     ``depth_threshold`` and confidence filtering, and its output has a max/p95
@@ -168,6 +228,7 @@ def write_processed_bundle(
     """
     import shutil
 
+    stream_size = infer_stream_size(stream_dir, fallback=stream_size)
     output_dir.mkdir(parents=True, exist_ok=True)
     transforms = streaming_to_transforms(
         stream_dir,

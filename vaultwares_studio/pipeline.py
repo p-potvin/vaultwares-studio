@@ -22,6 +22,7 @@ MANIFEST_SCHEMA_VERSION = 2
 ROOT = Path(__file__).resolve().parent.parent
 DATA_DIR = ROOT / "data"
 JOBS_DIR = DATA_DIR / "jobs"
+EXTERNAL_JOBS_DIR = Path("D:/vaultwares-studio-jobs/data/jobs")
 DEFAULT_SOURCE_VIDEO = ROOT / "my-room.mp4"
 DEFAULT_CAMERA_PROMPT = "show me the desk from the doorway, then orbit left and rise"
 
@@ -315,12 +316,22 @@ def load_job_manifest(path: Path | str) -> JobManifest:
 
 
 def list_job_manifests(jobs_dir: Path | str = JOBS_DIR) -> list[Path]:
-    root = Path(jobs_dir)
-    if not root.exists():
-        return []
-
-    manifests = [path for path in root.glob("*/manifest.json") if path.is_file()]
-    return sorted(manifests, key=lambda path: path.stat().st_mtime, reverse=True)
+    roots = [Path(jobs_dir)]
+    if Path(jobs_dir).resolve() == JOBS_DIR.resolve() and EXTERNAL_JOBS_DIR.exists():
+        roots.append(EXTERNAL_JOBS_DIR)
+    manifests = [path for root in roots if root.exists() for path in root.glob("*/manifest.json") if path.is_file()]
+    unique: list[Path] = []
+    seen_ids: set[str] = set()
+    for path in sorted(manifests, key=lambda item: item.stat().st_mtime, reverse=True):
+        try:
+            job_id = json.loads(path.read_text(encoding="utf-8"))["job_id"]
+        except (OSError, KeyError, TypeError, json.JSONDecodeError):
+            job_id = str(path.resolve())
+        if len(roots) > 1 and job_id in seen_ids:
+            continue
+        seen_ids.add(job_id)
+        unique.append(path)
+    return unique
 
 
 def load_latest_job_manifest(jobs_dir: Path | str = JOBS_DIR) -> JobManifest | None:

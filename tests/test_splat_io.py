@@ -64,6 +64,20 @@ def test_plain_point_cloud_is_not_gaussian(tmp_path):
         read_gaussian_ply(path)
 
 
+def test_plain_point_cloud_can_be_packed_as_opaque_splats(tmp_path):
+    from plyfile import PlyData, PlyElement
+    from vaultwares_studio.splat_io import read_point_cloud_as_splat
+    rows = np.array([(1.0, 2.0, 3.0, 255, 0, 128)], dtype=[("x", "f4"), ("y", "f4"), ("z", "f4"), ("red", "u1"), ("green", "u1"), ("blue", "u1")])
+    path = tmp_path / "points.ply"
+    PlyData([PlyElement.describe(rows, "vertex")]).write(str(path))
+    splat = read_point_cloud_as_splat(path, point_scale=0.02)
+    assert splat.count == 1
+    np.testing.assert_allclose(splat.positions[0], [1, 2, 3])
+    np.testing.assert_allclose(splat.colors_rgb()[0], [1, 0, 128 / 255], atol=1e-6)
+    assert splat.opacity[0] == 8
+    np.testing.assert_allclose(np.exp(splat.scales[0]), [0.02] * 3, rtol=1e-5)
+
+
 def test_decimate_caps_count():
     splat = make_splat(count=1000)
     smaller = decimate(splat, max_points=100)
@@ -86,7 +100,8 @@ def test_preview_ply_is_open3d_compatible_shape(tmp_path):
     assert not is_gaussian_ply(path)
 
 
-def test_convert_splat_outputs_writes_full_preview_and_usd(tmp_path):
+def test_convert_splat_outputs_writes_full_preview_and_usd(tmp_path, monkeypatch):
+    monkeypatch.setattr("vaultwares_studio.splat_io._native_gsplat_schema_available", lambda: False)
     splat = make_splat(count=400)
     source = tmp_path / "exported.ply"
     write_gaussian_ply(splat, source)
@@ -117,3 +132,40 @@ def test_convert_splat_outputs_writes_full_preview_and_usd(tmp_path):
     assert prim.GetAttribute("gsplat:count").Get() == 400
     assert prim.GetAttribute("gsplat:encoding").Get() == "3dgs-raw"
     assert prim.GetAttribute("gsplat:sh_rest_width").Get() == 45
+
+
+def test_native_splat_encoding_and_sh_order(tmp_path):
+    from pxr import Usd, UsdVol
+    from vaultwares_studio.splat_io import splat_to_usd
+
+    if not hasattr(UsdVol, "ParticleField3DGaussianSplat"):
+        pytest.skip("Native Gaussian schema requires OpenUSD 26.03+")
+    splat = make_splat(count=2, rest_width=9)
+    splat.scales[:] = np.log([1, 2, 3])
+    splat.opacity[:] = [0, np.inf]
+    splat.rotations[:] = [2, 0, 0, 0]
+    splat.sh_rest[:] = np.arange(9)
+    path = tmp_path / "native.usdc"
+    assert splat_to_usd(splat, path) == "native-gaussian-splats"
+    stage = Usd.Stage.Open(str(path))
+    prim = stage.GetPrimAtPath("/World/GaussianSplats")
+    assert prim.IsA(UsdVol.ParticleField3DGaussianSplat)
+    np.testing.assert_allclose(prim.GetAttribute("positions").Get(), splat.positions)
+    np.testing.assert_allclose(prim.GetAttribute("scales").Get(), [[1, 2, 3]] * 2)
+    np.testing.assert_allclose(prim.GetAttribute("opacities").Get(), [0.5, 1])
+    q = prim.GetAttribute("orientations").Get()[0]
+    assert q.GetReal() == pytest.approx(1)
+    np.testing.assert_allclose(q.GetImaginary(), [0, 0, 0])
+    assert prim.GetAttribute("radiance:sphericalHarmonicsDegree").Get() == 1
+    coeff = np.asarray(prim.GetAttribute("radiance:sphericalHarmonicsCoefficients").Get()).reshape(2, 4, 3)
+    np.testing.assert_allclose(coeff[:, 0], splat.sh0)
+    np.testing.assert_allclose(coeff[0, 1:], [[0, 3, 6], [1, 4, 7], [2, 5, 8]])
+    assert len(prim.GetAttribute("extent").Get()) == 2
+
+
+def test_native_splat_rejects_incomplete_sh_band(tmp_path):
+    from vaultwares_studio.splat_io import splat_to_usd, _native_gsplat_schema_available
+    if not _native_gsplat_schema_available():
+        pytest.skip("Native Gaussian schema unavailable")
+    with pytest.raises(ValueError, match="spherical harmonic"):
+        splat_to_usd(make_splat(count=2, rest_width=6), tmp_path / "invalid.usda")

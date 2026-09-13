@@ -242,15 +242,22 @@ def retrace_steps(
         look_at = position + forward * bounds.radius * look_ahead
         t = float(frame.get("time", index / fps))
         keyframes.append(
-            CameraKeyframe(t=t, position=position.tolist(), look_at=look_at.tolist())
+            CameraKeyframe(t=t, position=position.tolist(), look_at=look_at.tolist(), up=matrix[:3, 1].tolist())
         )
+    start_time = keyframes[0].t
+    for keyframe in keyframes:
+        keyframe.t -= start_time
     if seconds is not None and keyframes[-1].t > 0:
         scale = seconds / keyframes[-1].t
         keyframes = [
-            CameraKeyframe(t=keyframe.t * scale, position=keyframe.position, look_at=keyframe.look_at)
+            CameraKeyframe(t=keyframe.t * scale, position=keyframe.position, look_at=keyframe.look_at, up=keyframe.up)
             for keyframe in keyframes
         ]
-    return CameraEntity(name=name, source="captured", keyframes=keyframes)
+    first = frames[0]
+    fy = first.get("fl_y", data.get("fl_y"))
+    height = first.get("h", data.get("h"))
+    fov = math.degrees(2 * math.atan(float(height) / (2 * float(fy)))) if fy and height else 60.0
+    return CameraEntity(name=name, source="retrace", fov_degrees=fov, keyframes=keyframes)
 
 
 WALK_PATTERNS: dict[str, Callable[..., CameraEntity]] = {

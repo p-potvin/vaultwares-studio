@@ -3204,6 +3204,11 @@ class INRIAV2PlyParser {
 
             if (rawSplat[PLY_OPACITY] !== undefined) {
                 newSplat[OFFSET_OPACITY] = codeBook[CB_OPACITY][rawSplat[PLY_OPACITY]];
+            } else {
+                // Plain colored point-cloud PLYs have no opacity field. Treat
+                // them as opaque splats instead of passing undefined through
+                // clamp(), which creates transparent/black geometry.
+                newSplat[OFFSET_OPACITY] = 255;
             }
 
             newSplat[OFFSET_FDC0] = clamp(Math.floor(newSplat[OFFSET_FDC0]), 0, 255);
@@ -3224,11 +3229,17 @@ class INRIAV2PlyParser {
                 }
             }
 
-            const rot0 = codeBook[CB_ROTATION_RE][rawSplat[PLY_ROT_0]];
-            const rot1 = codeBook[CB_ROTATION_IM][rawSplat[PLY_ROT_1]];
-            const rot2 = codeBook[CB_ROTATION_IM][rawSplat[PLY_ROT_2]];
-            const rot3 = codeBook[CB_ROTATION_IM][rawSplat[PLY_ROT_3]];
-            tempRotation.set(rot0, rot1, rot2, rot3);
+            if (rawSplat[PLY_ROT_0] !== undefined && rawSplat[PLY_ROT_1] !== undefined &&
+                rawSplat[PLY_ROT_2] !== undefined && rawSplat[PLY_ROT_3] !== undefined) {
+                const rot0 = codeBook[CB_ROTATION_RE][rawSplat[PLY_ROT_0]];
+                const rot1 = codeBook[CB_ROTATION_IM][rawSplat[PLY_ROT_1]];
+                const rot2 = codeBook[CB_ROTATION_IM][rawSplat[PLY_ROT_2]];
+                const rot3 = codeBook[CB_ROTATION_IM][rawSplat[PLY_ROT_3]];
+                tempRotation.set(rot0, rot1, rot2, rot3);
+            } else {
+                // Plain point clouds have no orientation; use identity.
+                tempRotation.set(0, 0, 0, 1);
+            }
             tempRotation.normalize();
 
             newSplat[OFFSET_ROTATION0] = tempRotation.x;

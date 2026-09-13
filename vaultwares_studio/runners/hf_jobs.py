@@ -54,73 +54,6 @@ MIN_POLL_INTERVAL_SECONDS = 10.0
 TERMINAL_SUCCESS = {"COMPLETED"}
 TERMINAL_FAILURE = {"ERROR", "CANCELED", "CANCELLED", "DELETED"}
 
-_SPACE_URL_PREFIXES = (
-    "https://huggingface.co/spaces/",
-    "https://hf.co/spaces/",
-    "huggingface.co/spaces/",
-    "hf.co/spaces/",
-)
-
-
-def _run_job_compat(
-    *,
-    api,
-    image: str,
-    command: list[str],
-    env: dict,
-    secrets: dict,
-    flavor: str,
-    timeout_seconds: int,
-    token: str,
-):
-    """Submit a Job, bypassing huggingface_hub's spaceId rewrite for Space URLs.
-
-    HF Hub's _create_job_spec turns any hf.co/spaces/<owner>/<name> image URL
-    into ``spaceId: <owner>/<name>``. HF's backend 500s on spaceId for Spaces
-    that aren't yet indexed for Jobs (every freshly-created Space falls in
-    this window, even after the build completes and the Space shows RUNNING).
-    Posting the SAME URL as ``dockerImage`` skips the spaceId resolver and
-    works for both indexed and fresh Spaces. We only deviate from the SDK
-    path for Space URLs — non-Space images go through api.run_job unchanged.
-    """
-    is_space_url = any(image.startswith(prefix) for prefix in _SPACE_URL_PREFIXES)
-    if not is_space_url:
-        return api.run_job(
-            image=image,
-            command=command,
-            env=env,
-            secrets=secrets,
-            flavor=flavor,
-            timeout=timeout_seconds,
-            token=token,
-        )
-    # Manual POST with dockerImage. Payload shape mirrors _create_job_spec.
-    import httpx
-    from huggingface_hub import HfApi
-    from huggingface_hub.hf_api import JobInfo
-    from huggingface_hub.utils import build_hf_headers
-
-    hf = HfApi(token=token)
-    namespace = hf.whoami()["name"]
-    payload: dict = {
-        "command": command,
-        "arguments": [],
-        "environment": env or {},
-        "flavor": flavor,
-        "timeoutSeconds": int(timeout_seconds),
-        "dockerImage": image,
-    }
-    if secrets:
-        payload["secrets"] = secrets
-    response = httpx.post(
-        f"{hf.endpoint}/api/jobs/{namespace}",
-        json=payload,
-        headers=build_hf_headers(token=token),
-        timeout=30.0,
-    )
-    response.raise_for_status()
-    return JobInfo(**response.json(), endpoint=hf.endpoint)
-
 # Runs inside the job container (via VW_BOOTSTRAP env): pull inputs, run the
 # stage command, push outputs. Kept dependency-free beyond huggingface_hub.
 BOOTSTRAP_SOURCE = """
@@ -505,11 +438,17 @@ class HfJobsStageRunner(StageRunner):
                 local_tmp = api.hf_hub_download(
                     repo_id=repo, filename=remote, repo_type="dataset", local_dir=tmp
                 )
-                name = Path(remote).name
-                target = by_name.get(name)
+                relative = Path(remote[len(out_prefix):])
+                if relative.is_absolute() or ".." in relative.parts:
+                    raise ValueError(f"Invalid output artifact path: {relative}")
+                name = relative.as_posix()
+                # Only root outputs satisfy the stage contract. Nested files
+                # often share names (depth/0001 vs confidence/0001) and must
+                # retain their directories rather than overwrite each other.
+                target = by_name.get(name) if len(relative.parts) == 1 else None
                 if target is None:
                     fallback_dir.mkdir(parents=True, exist_ok=True)
-                    target = fallback_dir / name
+                    target = fallback_dir / relative
                 target.parent.mkdir(parents=True, exist_ok=True)
                 shutil.copyfile(local_tmp, target)
                 downloaded.append(target)

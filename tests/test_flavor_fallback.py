@@ -55,6 +55,7 @@ class _FakeHub:
         job_id = f"job-{len(self.submitted)}"
         self.submitted.append(flavor)
         self._flavor_by_job[job_id] = flavor
+        self.last_image = image
         return _Job(job_id, flavor)
 
     def inspect_job(self, *, job_id, token):
@@ -162,6 +163,14 @@ def test_plain_string_flavor_still_works(tmp_path):
 
     assert runner.hub.submitted == ["l4x1"]
     assert result.metadata["flavor"] == "l4x1"
+
+
+def test_space_image_is_delegated_to_the_hub_client(tmp_path):
+    runner = _FakeRunner(schedulable={"l4x1"})
+    runner.run(_ctx(tmp_path, "l4x1", image="hf.co/spaces/clopeux/vw-studio-da3-gs"))
+    # HfApi.run_job emits spaceId for this URL; an agent-side dockerImage
+    # workaround would turn it into a nonexistent OCI :latest image.
+    assert runner.hub.last_image == "hf.co/spaces/clopeux/vw-studio-da3-gs"
 
 
 def test_cost_confirmation_quotes_the_priciest_candidate(tmp_path):

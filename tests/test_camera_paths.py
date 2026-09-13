@@ -96,10 +96,31 @@ def test_author_usd_camera_time_samples(tmp_path):
     )
     prim = stage.GetPrimAtPath("/World/PathCam")
     op = prim.GetAttribute("xformOp:transform")
-    assert op.GetNumTimeSamples() == 3
+    assert op.GetNumTimeSamples() == 97
     still = stage.GetPrimAtPath("/World/StillCam")
     assert still.GetAttribute("xformOp:transform").GetNumTimeSamples() == 0
     assert prim.GetAttribute("vw:cameraName").Get() == "Test Path"
+
+
+def test_nonuniform_keyframe_timing_and_usd_render_parity(tmp_path):
+    from pxr import Usd, UsdGeom
+    entity = CameraEntity(name="Timed", fov_degrees=47, keyframes=[
+        CameraKeyframe(0, [0, 0, 4], [0, 0, 0]),
+        CameraKeyframe(1, [4, 0, 4], [0, 0, 0]),
+        CameraKeyframe(4, [4, 4, 4], [0, 0, 0]),
+    ])
+    samples = sample_path(entity, fps=30)
+    np.testing.assert_allclose(samples[30][0], [4, 0, 4], atol=1e-7)
+    stage = Usd.Stage.CreateNew(str(tmp_path / "timed.usda"))
+    camera = author_usd_camera(stage, "/World/Camera", entity, fps=30)
+    assert stage.GetTimeCodesPerSecond() == 30
+    assert stage.GetEndTimeCode() == 120
+    for index in [0, 15, 30, 90, 120]:
+        actual = np.asarray(UsdGeom.Xformable(camera).GetLocalTransformation(Usd.TimeCode(index))).T
+        expected = camera_to_world(*samples[index])
+        np.testing.assert_allclose(actual, expected, atol=1e-7)
+    fov = np.degrees(2 * np.arctan(camera.GetVerticalApertureAttr().Get() / (2 * camera.GetFocalLengthAttr().Get())))
+    assert fov == pytest.approx(47, abs=1e-5)
 
 
 def test_camera_staging_stage_integrates_captures():

@@ -459,6 +459,26 @@ def make_depth_bundle(processed: Path, output_path: Path) -> Path | None:
 
 
 STREAMING_DIR = Path("/opt/vw/da3_streaming")
+SALAD_CHECKPOINT_URL = "https://github.com/serizba/salad/releases/download/v1.0.0/dino_salad.ckpt"
+
+
+def stage_salad_checkpoint(weights: Path) -> Path:
+    """Fetch the upstream place-recognition checkpoint once, with no retry loop."""
+    import urllib.request
+
+    target = weights / "dino_salad.ckpt"
+    if target.exists() and target.stat().st_size:
+        return target
+    partial = target.with_suffix(".partial")
+    try:
+        with urllib.request.urlopen(SALAD_CHECKPOINT_URL, timeout=120) as response, partial.open("wb") as stream:
+            shutil.copyfileobj(response, stream)
+        if partial.stat().st_size == 0:
+            raise ValueError("SALAD checkpoint download was empty.")
+        partial.replace(target)
+    finally:
+        partial.unlink(missing_ok=True)
+    return target
 
 
 def run_stream_sfm(
@@ -516,6 +536,10 @@ def run_stream_sfm(
         shutil.copyfile(cached, weights / filename)
     timings["stream_weights_s"] = round(time.monotonic() - started, 1)
     log(f"Weights staged in {weights}")
+    if args.stream_loop_closure:
+        started = time.monotonic()
+        stage_salad_checkpoint(weights)
+        timings["salad_weights_s"] = round(time.monotonic() - started, 1)
 
     config = {
         "Weights": {
@@ -529,6 +553,10 @@ def run_stream_sfm(
             "loop_chunk_size": 20,
             "loop_enable": bool(args.stream_loop_closure),
             "useDBoW": False,
+            # Retain stable outputs (poses, PCD, loop report and per-frame
+            # depth/confidence) but delete DA3's raw aligned/unaligned chunk
+            # scratch. Upstream estimates that scratch alone at ~5 GB for 300
+            # frames; retaining it makes packaging dominate a short inference.
             "delete_temp_files": True,
             # triton is present in this image via torch 2.1.2; it is the fastest
             # of the four align backends.
@@ -539,8 +567,8 @@ def run_stream_sfm(
             "ref_view_strategy": "saddle_balanced",
             "ref_view_strategy_loop": "saddle_balanced",
             "depth_threshold": 15.0,
-            "save_depth_conf_result": False,  # we only need poses + point cloud
-            "save_debug_info": False,
+            "save_depth_conf_result": True,
+            "save_debug_info": True,
             "Sparse_Align": {"keypoint_select": "orb", "keypoint_num": 5000},
             # tol and lambda_init below are STRINGS on purpose — streaming does
             # eval() on both (sim3utils.py:1216+, sim3loop.py:227). That works
@@ -566,7 +594,16 @@ def run_stream_sfm(
     config_path = work / "stream_config.yaml"
     config_path.write_text(yaml.safe_dump(config, sort_keys=False), encoding="utf-8")
 
-    stream_out = work / "stream_out"
+    # Retain all outputs, including partial products on normal child failure.
+    # Weights remain outside VW_OUT and are not re-uploaded as job data.
+    stream_out = out_dir / "streaming"
+    stream_out.mkdir(parents=True, exist_ok=True)
+    shutil.copyfile(config_path, stream_out / "config.yaml")
+    (stream_out / "input_frames.json").write_text(json.dumps({
+        "frames": [p.name for p in image_paths],
+        "source_size": [orig_w, orig_h],
+        "stream_size": [stream_w, stream_h],
+    }, indent=2), encoding="utf-8")
     started = time.monotonic()
     result = run_da3_streaming(
         [
@@ -626,6 +663,24 @@ def run_da3_streaming(cmd: list[str], cwd: str) -> subprocess.CompletedProcess:
         log(f"  {line.rstrip()}")
     proc.wait()
     return subprocess.CompletedProcess(cmd, proc.returncode, "", "")
+
+
+def find_checkpoint_dir(root: Path) -> Path | None:
+    """The directory ``ns-train --load-dir`` wants: the one holding the .ckpt files.
+
+    Not the run directory. nerfstudio's ``_load_checkpoint`` does a bare
+    ``os.listdir(load_dir)`` and parses a step number out of *every* entry
+    (``step-000019999.ckpt`` -> 19999), so handing it the run directory — which
+    also contains ``config.yml`` and ``nerfstudio_models/`` — dies with
+    ``invalid literal for int() with base 10: 'nerfstudio_model'``. Found the
+    first time --refine-mode was ever run, Sun 13 Sep 2026.
+
+    The newest checkpoint wins when an archive carries several runs.
+    """
+    candidates = {path.parent for path in root.rglob("*.ckpt")}
+    if not candidates:
+        return None
+    return max(candidates, key=lambda p: max(c.stat().st_mtime for c in p.glob("*.ckpt")))
 
 
 def make_processed_min(processed: Path, output_path: Path) -> None:
@@ -982,15 +1037,19 @@ def main() -> int:  # noqa: PLR0911, PLR0915
         ]
         if args.refine_mode:
             bundle_model = in_dir / "model.zip"
-            if bundle_model.exists():
-                base_train = Path("/tmp/da3_recon/base_train")
-                base_train.mkdir(parents=True, exist_ok=True)
-                with zipfile.ZipFile(bundle_model) as archive:
-                    archive.extractall(base_train)
-                configs = sorted(base_train.rglob("config.yml"), key=lambda p: p.stat().st_mtime, reverse=True)
-                if configs:
-                    train_cmd.extend(["--load-dir", str(configs[0].parent)])
-                    log(f"Refine: loading checkpoint from {configs[0].parent}")
+            if not bundle_model.exists():
+                return fail(out_dir, "missing_input", "--refine-mode requires model.zip in $VW_IN")
+            base_train = Path("/tmp/da3_recon/base_train")
+            base_train.mkdir(parents=True, exist_ok=True)
+            with zipfile.ZipFile(bundle_model) as archive:
+                archive.extractall(base_train)
+            load_dir = find_checkpoint_dir(base_train)
+            if load_dir is None:
+                return fail(out_dir, "no_checkpoint",
+                            f"no *.ckpt inside model.zip ({bundle_model})")
+            train_cmd.extend(["--load-dir", str(load_dir)])
+            log(f"Refine: resuming from {load_dir} "
+                f"({', '.join(sorted(p.name for p in load_dir.glob('*.ckpt'))[-2:])})")
         result = run_streaming(train_cmd)
         timings["train_s"] = round(time.monotonic() - started, 1)
         if result.returncode != 0:

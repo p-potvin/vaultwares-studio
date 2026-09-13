@@ -512,6 +512,21 @@ class ViewportPanel(QFrame):
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text(json.dumps(cameras, indent=2), encoding="utf-8")
         self._refresh_cameras()
+        from vaultwares_studio.camera_scene import load_active_camera, save_active_camera
+        from vaultwares_studio.camera_paths import build_visit_path, load_captured_entities
+        active = load_active_camera(self._job_dir)
+        if active and active.source == "captured":
+            entities = load_captured_entities(path)
+            visit = build_visit_path(entities)
+            if visit or entities:
+                save_active_camera(self._job_dir, visit or entities[0])
+            else:
+                # Removing the last captured stop must not leave a stale path.
+                for name in ("active_camera.json", "camera_path.json"):
+                    (self._job_dir / "usd" / name).unlink(missing_ok=True)
+                from vaultwares_studio.camera_scene import compose_scene
+                compose_scene(self._job_dir / "usd" / "digital_twin_scene.usda",
+                              self._job_dir / "reconstruction" / "cloud.usda", [])
 
     def _refresh_cameras(self) -> None:
         if self.web_view is None:
@@ -542,7 +557,8 @@ class ViewportPanel(QFrame):
         self._save_captured(cameras)
 
     def _preview_path(self) -> None:
-        from vaultwares_studio.camera_paths import build_visit_path, load_captured_entities, sample_path
+        from vaultwares_studio.camera_paths import build_visit_path, load_captured_entities, to_viewer_frames
+        from vaultwares_studio.camera_scene import save_active_camera
 
         path = self._captured_path
         entities = load_captured_entities(path) if path else []
@@ -550,17 +566,16 @@ class ViewportPanel(QFrame):
         if visit is None:
             self._set_status(self._t("viewport_need_two"))
             return
-        frames = [
-            {"position": [float(v) for v in pos], "lookAt": [float(v) for v in target]}
-            for pos, target in sample_path(visit, fps=30)
-        ]
+        save_active_camera(self._job_dir, visit)
+        frames = to_viewer_frames(visit)
         self.web_view.page().runJavaScript(f"window.playPath({json.dumps(frames)}, 30);")
 
     def _apply_pattern(self) -> None:
         """Generate the selected walk pattern, persist as render path, preview live."""
         if self._job_dir is None or self.web_view is None:
             return
-        from vaultwares_studio.camera_paths import sample_path, to_nerfstudio_camera_path
+        from vaultwares_studio.camera_paths import to_viewer_frames
+        from vaultwares_studio.camera_scene import save_active_camera
         from vaultwares_studio.walk_patterns import build_pattern
 
         name = self.pattern_select.currentText()
@@ -584,17 +599,10 @@ class ViewportPanel(QFrame):
 
         # Persist as the active render path so cosmos_output renders this
         # walkthrough instead of falling back to the default orbit.
-        render_path = self._job_dir / "usd" / "camera_path.json"
-        render_path.parent.mkdir(parents=True, exist_ok=True)
-        render_path.write_text(
-            json.dumps(to_nerfstudio_camera_path(entity), indent=2), encoding="utf-8"
-        )
+        save_active_camera(self._job_dir, entity)
 
         # Live preview through the existing playPath JS hook.
-        frames = [
-            {"position": [float(v) for v in pos], "lookAt": [float(v) for v in target]}
-            for pos, target in sample_path(entity, fps=30)
-        ]
+        frames = to_viewer_frames(entity)
         self.web_view.page().runJavaScript(f"window.playPath({json.dumps(frames)}, 30);")
         self._set_status(self._t("viewport_pattern_applied").format(name=name))
 
@@ -612,15 +620,8 @@ class ViewportPanel(QFrame):
         """Best-effort lookup for the Nerfstudio dataparser transforms file."""
         if self._job_dir is None:
             return None
-        candidates = [
-            self._job_dir / "reconstruction" / "transforms.json",
-            self._job_dir / "reconstruction" / "remote_out" / "transforms.json",
-            self._job_dir / "reconstruction" / "remote_out" / "dataparser_transforms.json",
-        ]
-        for candidate in candidates:
-            if candidate.exists():
-                return candidate
-        return None
+        from vaultwares_studio.camera_scene import prepare_retrace_transforms
+        return prepare_retrace_transforms(self._job_dir)
 
     def reload_scene(self) -> None:
         if self.web_view is None or self._job_dir is None:
@@ -630,6 +631,16 @@ class ViewportPanel(QFrame):
         # that pre-date the packer.
         packed = self._job_dir / "reconstruction" / "cloud.splat"
         ply = self._job_dir / "reconstruction" / "cloud.ply"
+        if not packed.exists() and ply.exists():
+            from vaultwares_studio.splat_io import is_gaussian_ply, read_point_cloud_as_splat
+            from vaultwares_studio.splat_packed import write_splat_format
+            if not is_gaussian_ply(ply):
+                try:
+                    self._set_status(self._t("viewport_converting_point_cloud"))
+                    write_splat_format(read_point_cloud_as_splat(ply), packed)
+                    self.log.emit(f"[viewport] Converted plain point cloud to packed splat: {packed.name}")
+                except Exception as exc:  # noqa: BLE001 - retain PLY fallback for diagnostics
+                    self.log.emit(f"[viewport] Plain point-cloud conversion skipped: {exc}")
         splat = packed if packed.exists() else ply
         url = QUrl(self._server.url())
         if splat.exists():
@@ -718,8 +729,7 @@ class ViewportPanel(QFrame):
                 cameras = []
         pose["name"] = f"Captured {len(cameras) + 1}"
         cameras.append(pose)
-        store.write_text(json.dumps(cameras, indent=2), encoding="utf-8")
-        self._refresh_cameras()
+        self._save_captured(cameras)
         self._set_status(self._t("viewport_captured").format(count=len(cameras)))
 
 

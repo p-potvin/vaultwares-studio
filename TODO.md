@@ -67,6 +67,14 @@ Plan of record: `docs/plans/plan-v1-remote-first-20260609.md` (M0–M6). Legacy 
 - [ ] Test GPU *matching* with CPU *extraction* (`--no-gpu` currently disables both; the container bug may be extraction-only). If matching works on GPU, COLMAP drops from ~20 min to ~2 min on the L4 → run cost ~USD 0.15, no orchestration changes.
 - [ ] Else: split reconstruction into two jobs — SfM on `cpu-upgrade` (~USD 0.04) + training on `l4x1` (~USD 0.13), processed dataset handed off through the artifact dataset (user-proposed; boot latency acceptable for batch work). ZeroGPU evaluated and rejected (2-min GPU slices can't hold a training run); free Space CPU tier rejected (2 vCPU, no job semantics, ToS-gray).
 
+## Sun, 13 Sep 2026 — intrinsics fix, capture cameras, fused mesh
+
+- [x] ZeroGPU import scaled DA3 intrinsics from the *fed* resolution (672x378) instead of DA3's working one (504x280): focal 25% short, principal point off-centre on every September splat. `streaming_convert.infer_stream_size` + a principal-point guard. See [docs/da3-intrinsics-cameras-mesh-20260913.md](docs/da3-intrinsics-cameras-mesh-20260913.md).
+- [x] Camera staging authors the reconstruction's real cameras (`/World/Capture`, `usd/capture_cameras.json`), retraces the trajectory as the default render path, scales presets to scene bounds, references the fused mesh.
+- [x] TSDF mesh from DA3-Streaming depth/confidence (`tools/fuse_streaming_mesh.py`), 10 s on the CPU for 500 frames.
+- [ ] Space: retire the 672x378 preset (DA3 downsizes anyway) and expose the loop similarity threshold (0.85 found 2 near-neighbour pairs on a walk that closed to 6% of its extent).
+- [ ] dn-splatter in the worker image: depth + normal supervision from the now-retained DA3 fields.
+
 ## Infra notes
 
 - Worker image is built server-side on HF (local Docker/WSL unavailable): `tools/push_worker_space.py` + `tools/monitor_worker_space.py`; image ref `hf.co/spaces/clopeux/vw-studio-worker` (set in data/remote_compute.json)

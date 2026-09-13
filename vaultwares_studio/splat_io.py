@@ -11,8 +11,9 @@ Open3D fallback viewer, and the USD export is lossless:
   (``primvars:gsplat:*``) carrying every gaussian attribute, which is valid
   USD today and forward-convertible to the native schema later.
 
-Attribute encoding note: values are stored exactly as 3DGS PLYs encode them
-(log-scales, logit opacities, unnormalized quaternions, SH coefficients).
+Native USD uses linear scales, opacity probabilities, unit quaternions and
+RGB SH triplets. The source PLY and the older points fallback retain raw PLY
+encodings (log-scales, logits, wxyz quaternions, channel-major SH).
 """
 
 from __future__ import annotations
@@ -47,11 +48,27 @@ class GaussianSplat:
 
 
 def is_gaussian_ply(path: Path) -> bool:
-    try:
-        from plyfile import PlyData
+    """Identify Gaussian PLY headers without loading the full point payload.
 
-        header = PlyData.read(str(path))
-        names = {prop.name for prop in header["vertex"].properties}
+    The viewport only needs this classification before passing the PLY to its
+    browser renderer.  Keeping it dependency-free means a valid trained splat
+    remains loadable even in desktop environments that do not install
+    ``plyfile`` for USD/export tooling.
+    """
+    try:
+        with path.open("rb") as stream:
+            header = stream.read(128 * 1024)
+        marker = header.find(b"end_header")
+        if marker < 0:
+            return False
+        lines = header[:marker].decode("ascii", "strict").splitlines()
+        names: set[str] = set()
+        in_vertex = False
+        for line in lines:
+            if line.startswith("element "):
+                in_vertex = line.startswith("element vertex ")
+            elif in_vertex and line.startswith("property "):
+                names.add(line.split()[-1])
     except Exception:  # noqa: BLE001 - unreadable/odd PLY is simply not a splat
         return False
     return all(name in names for name in _GAUSSIAN_REQUIRED)
@@ -88,6 +105,40 @@ def read_gaussian_ply(path: Path) -> GaussianSplat:
         scales=scales,
         rotations=rotations,
         sh_rest=sh_rest,
+    )
+
+
+def read_point_cloud_as_splat(path: Path, *, point_scale: float = 0.01) -> GaussianSplat:
+    """Convert a plain colored XYZ PLY into renderable opaque splats.
+
+    DA3-Streaming emits a point cloud rather than a trained Gaussian PLY. The
+    browser Gaussian renderer needs linear positions plus opacity, scale and
+    rotation fields, so synthesize a conservative isotropic representation.
+    This preserves the point-cloud appearance and never changes true Gaussian
+    PLYs, which continue through :func:`read_gaussian_ply` unchanged.
+    """
+    from plyfile import PlyData
+
+    vertex = PlyData.read(str(path))["vertex"]
+    names = {prop.name for prop in vertex.properties}
+    if not {"x", "y", "z"} <= names:
+        raise ValueError(f"{path} is missing x/y/z point properties.")
+    positions = np.stack([np.asarray(vertex[name], dtype=np.float32) for name in ("x", "y", "z")], axis=1)
+    colors = np.full((len(vertex), 3), 0.5, dtype=np.float32)
+    color_names = ("red", "green", "blue")
+    if set(color_names) <= names:
+        colors = np.stack([np.asarray(vertex[name], dtype=np.float32) / 255.0 for name in color_names], axis=1)
+    elif {"r", "g", "b"} <= names:
+        colors = np.stack([np.asarray(vertex[name], dtype=np.float32) for name in ("r", "g", "b")], axis=1)
+        if colors.max(initial=0) > 1.0:
+            colors /= 255.0
+    colors = np.clip(colors, 0.0, 1.0)
+    return GaussianSplat(
+        positions=positions,
+        sh0=((colors - 0.5) / _SH_C0).astype(np.float32),
+        opacity=np.full(len(vertex), 8.0, dtype=np.float32),
+        scales=np.full((len(vertex), 3), np.log(max(point_scale, 1e-5)), dtype=np.float32),
+        rotations=np.tile(np.array([1.0, 0.0, 0.0, 0.0], dtype=np.float32), (len(vertex), 1)),
     )
 
 
@@ -153,30 +204,70 @@ def write_preview_ply(splat: GaussianSplat, path: Path, max_points: int = 200_00
 def _native_gsplat_schema_available() -> bool:
     """Probe the installed OpenUSD for a native gaussian-splat prim type (26.03+)."""
     try:
-        from pxr import Usd
+        from pxr import Usd, UsdVol
 
-        registry = Usd.SchemaRegistry()
-        for type_name in ("GaussianSplats", "Gsplats", "GsplatAsset"):
-            try:
-                if registry.FindConcretePrimDefinition(type_name):
-                    return True
-            except Exception:  # noqa: BLE001
-                continue
+        return hasattr(UsdVol, "ParticleField3DGaussianSplat") and bool(
+            Usd.SchemaRegistry().FindConcretePrimDefinition("ParticleField3DGaussianSplat")
+        )
     except Exception:  # noqa: BLE001
         pass
     return False
+
+
+def _author_native_splat(stage, splat: GaussianSplat):
+    from pxr import UsdGeom, UsdVol, Vt
+
+    rest_width = splat.sh_rest.shape[1] if splat.sh_rest is not None else 0
+    coefficient_count = 1 + rest_width // 3
+    degree = int(np.sqrt(coefficient_count)) - 1
+    if rest_width % 3 or (degree + 1) ** 2 != coefficient_count:
+        raise ValueError("PLY spherical harmonic coefficients must contain complete RGB bands.")
+    with np.errstate(over="ignore", invalid="ignore"):
+        scales = np.exp(splat.scales).astype(np.float32)
+    norms = np.linalg.norm(splat.rotations.astype(np.float64), axis=1, keepdims=True)
+    if (not np.isfinite(splat.positions).all() or not np.isfinite(scales).all()
+            or not np.isfinite(norms).all() or np.any(norms <= 1e-12)
+            or np.isnan(splat.opacity).any()):
+        raise ValueError("Native splats require finite geometry, valid quaternions and non-NaN opacity.")
+    # Stable sigmoid, including +/- infinity from feed-forward predictions.
+    opacity = np.exp(-np.logaddexp(0.0, -splat.opacity.astype(np.float64))).astype(np.float32)
+    rotations = (splat.rotations / norms).astype(np.float32)
+    coeff = np.empty((splat.count, coefficient_count, 3), dtype=np.float32)
+    coeff[:, 0] = splat.sh0
+    if rest_width:
+        coeff[:, 1:] = splat.sh_rest.reshape(splat.count, 3, -1).transpose(0, 2, 1)
+    if not np.isfinite(coeff).all():
+        raise ValueError("Native splats require finite spherical harmonic coefficients.")
+
+    field = UsdVol.ParticleField3DGaussianSplat.Define(stage, "/World/GaussianSplats")
+    prim = field.GetPrim()
+    UsdVol.ParticleFieldPositionAttributeAPI(prim).CreatePositionsAttr(
+        Vt.Vec3fArray.FromNumpy(np.ascontiguousarray(splat.positions)))
+    UsdVol.ParticleFieldScaleAttributeAPI(prim).CreateScalesAttr(Vt.Vec3fArray.FromNumpy(scales))
+    UsdVol.ParticleFieldOpacityAttributeAPI(prim).CreateOpacitiesAttr(Vt.FloatArray(opacity.tolist()))
+    # Vt's numpy bridge expects xyzw buffers although Gf.Quatf's constructor
+    # takes wxyz. Reordering here avoids silently rotating every Gaussian.
+    UsdVol.ParticleFieldOrientationAttributeAPI(prim).CreateOrientationsAttr(
+        Vt.QuatfArray.FromNumpy(np.ascontiguousarray(rotations[:, [1, 2, 3, 0]])))
+    radiance = UsdVol.ParticleFieldSphericalHarmonicsAttributeAPI(prim)
+    radiance.CreateRadianceSphericalHarmonicsDegreeAttr(degree)
+    radiance.CreateRadianceSphericalHarmonicsCoefficientsAttr(
+        Vt.Vec3fArray.FromNumpy(coeff.reshape(-1, 3)))
+    field.CreateDisplayColorAttr(Vt.Vec3fArray.FromNumpy(splat.colors_rgb().astype(np.float32)))
+    if splat.count:
+        # Conservative 3-sigma bounds, independent of ellipsoid orientation.
+        radius = 3 * scales.max(axis=1, keepdims=True)
+        extent = np.stack([(splat.positions - radius).min(axis=0),
+                           (splat.positions + radius).max(axis=0)]).astype(np.float32)
+        UsdGeom.Boundable(prim).CreateExtentAttr(Vt.Vec3fArray.FromNumpy(extent))
+    return prim
 
 
 def splat_to_usd(splat: GaussianSplat, path: Path, source: str = "") -> str:
     """Author the splat to USD losslessly. Returns the mode used."""
     from pxr import Gf, Sdf, Usd, UsdGeom, Vt
 
-    if _native_gsplat_schema_available():
-        # Native authoring lands when usd-core ships the 26.03 schema; the
-        # primvar layout below is designed to convert 1:1 when that happens.
-        mode = "native-schema-available-but-unwired"
-    else:
-        mode = "points+primvars"
+    mode = "native-gaussian-splats" if _native_gsplat_schema_available() else "points+primvars"
 
     path.parent.mkdir(parents=True, exist_ok=True)
     if path.exists():
@@ -185,6 +276,15 @@ def splat_to_usd(splat: GaussianSplat, path: Path, source: str = "") -> str:
     UsdGeom.SetStageUpAxis(stage, UsdGeom.Tokens.y)
     root = UsdGeom.Xform.Define(stage, "/World")
     stage.SetDefaultPrim(root.GetPrim())
+
+    if mode == "native-gaussian-splats":
+        prim = _author_native_splat(stage, splat)
+        prim.CreateAttribute("gsplat:count", Sdf.ValueTypeNames.Int, custom=True).Set(splat.count)
+        prim.CreateAttribute("gsplat:encoding", Sdf.ValueTypeNames.String, custom=True).Set("usd-native")
+        if source:
+            prim.CreateAttribute("gsplat:source", Sdf.ValueTypeNames.String, custom=True).Set(source)
+        stage.GetRootLayer().Save()
+        return mode
 
     points_prim = UsdGeom.Points.Define(stage, "/World/GaussianSplats")
     points_prim.GetPointsAttr().Set(Vt.Vec3fArray.FromNumpy(splat.positions))

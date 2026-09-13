@@ -116,6 +116,13 @@ def run(ctx: "DigitalTwinStudioRunner", stage: "StageRecord") -> None:
 
     if not degraded and ctx.recon_preview_ply_path.exists():
         _gravity_align(ctx, stage)
+        if is_gaussian_ply(ctx.recon_ply_path):
+            from ..splat_io import read_gaussian_ply, splat_to_usd
+            # The viewer uses the rotated PLY; USD must use that same world.
+            stage.metadata["usd_mode"] = splat_to_usd(
+                read_gaussian_ply(ctx.recon_ply_path), ctx.recon_stage_path,
+                source=ctx.recon_ply_path.name,
+            )
     if not degraded and ctx.recon_ply_path.exists():
         _write_packed_splat(ctx, stage)
 

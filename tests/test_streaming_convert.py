@@ -13,6 +13,8 @@ Both failure modes train without raising, which is exactly why they are pinned.
 
 from __future__ import annotations
 
+import json
+
 import numpy as np
 import pytest
 
@@ -204,3 +206,46 @@ def test_payload_carries_the_ply_pointer_splatfacto_needs(tmp_path):
 def test_flip_matrix_is_its_own_inverse():
     """diag(1,-1,-1,1) squared is identity — applying it twice is a no-op."""
     assert OPENCV_TO_OPENGL @ OPENCV_TO_OPENGL == pytest.approx(np.eye(4))
+
+
+# -- resolution inference -------------------------------------------------------
+
+
+def test_infer_stream_size_prefers_the_retained_npz_over_the_fed_size(tmp_path):
+    """DA3 works at 504x280 whatever it was fed; the npz image shape says so."""
+    results = tmp_path / "results_output"
+    results.mkdir()
+    np.savez(results / "frame_0.npz", image=np.zeros((280, 504, 3), dtype=np.uint8))
+    from vaultwares_studio.streaming_convert import infer_stream_size
+
+    assert infer_stream_size(tmp_path, fallback=(672, 378)) == (504, 280)
+
+
+def test_infer_stream_size_falls_back_to_the_principal_point(tmp_path):
+    from vaultwares_studio.streaming_convert import infer_stream_size
+
+    _write_stream_dir(tmp_path, _pose()[None], np.array([[430.0, 428.0, 252.0, 140.0]]))
+    assert infer_stream_size(tmp_path, fallback=(672, 378)) == (504, 280)
+
+
+def test_wrong_stream_size_is_refused(tmp_path):
+    """The September bug: 504-frame intrinsics scaled as if they were 672 wide."""
+    _write_stream_dir(tmp_path, _pose()[None], np.array([[430.0, 428.0, 252.0, 140.0]]))
+    with pytest.raises(ValueError, match="principal point"):
+        streaming_to_transforms(tmp_path, ["a.jpg"], stream_size=(672, 378), original_size=(1920, 1080))
+
+
+def test_write_bundle_infers_size_and_centres_the_principal_point(tmp_path):
+    from vaultwares_studio.streaming_convert import write_processed_bundle
+
+    stream = tmp_path / "stream"
+    stream.mkdir()
+    _write_stream_dir(stream, _pose()[None], np.array([[430.0, 428.0, 252.0, 140.0]]))
+    (stream / "pcd").mkdir()
+    (stream / "pcd" / "combined_pcd.ply").write_text("ply\nformat ascii 1.0\nelement vertex 0\nend_header\n")
+    transforms_path, _ = write_processed_bundle(
+        stream, ["a.jpg"], tmp_path / "out", stream_size=(672, 378), original_size=(1920, 1080)
+    )
+    frame = json.loads(transforms_path.read_text())["frames"][0]
+    assert frame["cx"] == pytest.approx(960.0) and frame["cy"] == pytest.approx(540.0)
+    assert frame["fl_x"] == pytest.approx(430.0 * 1920 / 504)

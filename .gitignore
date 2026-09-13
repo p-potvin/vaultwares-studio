@@ -232,3 +232,10 @@ Screen*
 inputs/
 
 data/
+# Machine-local symlink into D:\3D Reconstruction — not portable.
+colmap-project
+
+# Generated build context: copies of docker/worker/* assembled by
+# tools/push_da3_space.py at push time. The originals are the source.
+docker/da3/build_ctx/
+inputs

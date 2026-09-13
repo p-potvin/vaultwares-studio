@@ -6,6 +6,72 @@ If you are just trying to answer, "Does this repo work on my machine?", start wi
 
 ## What You Can Run Today
 
+### Native USD and camera paths
+
+### Importing a ZeroGPU artifact into the desktop app
+
+The ZeroGPU console returns an artifact ZIP rather than a `data/jobs` manifest.
+Materialize it on D: so `gui_app.py` can discover it alongside normal jobs:
+
+```powershell
+.venv\Scripts\python.exe tools\import_zerogpu_artifact.py `
+  D:\vaultwares-studio-jobs\data\review\sep08\zerogpu-loop-on-high-672\da3_streaming_artifacts.zip `
+  --job-id zerogpu-img1274-loop-on
+```
+
+The importer writes a lightweight job folder under
+`D:\vaultwares-studio-jobs\data\jobs`, extracts the point cloud and pose
+files, regenerates a Nerfstudio-compatible `transforms.json`, and leaves the
+original ZIP beside the imported files. The desktop job dropdown includes this
+external D: job root and deduplicates an accidental local copy by job ID. Select
+the imported job, then open the 3D viewport. It is a point-cloud reconstruction
+until a Gaussian/splat asset is trained or exported; camera retrace uses the
+generated transforms.
+
+With OpenUSD 26.03 or later, reconstruction export uses
+`UsdVol.ParticleField3DGaussianSplat`. The converter decodes PLY log-scales and
+opacity logits, normalizes quaternions, and rearranges channel-major spherical
+harmonics into USD RGB coefficients. Older USD installations retain the custom
+points/primvars fallback. The original Gaussian PLY remains available.
+
+To export an existing job into a **new**, separate review folder without
+reconstruction or training:
+
+```powershell
+.venv\Scripts\python.exe tools\export_native_scene.py `
+  --job data\jobs\<job-id> --output data\review\<new-review-folder>
+```
+
+Open `scene.usda` and keep its sibling `cloud.usdc` beside it. The package
+includes an orbit camera, a retrace camera when saved poses are available, and
+the active custom path if one has been saved. The camera display names identify
+them. This verifies composition, not visual renderer compatibility; you need a
+renderer that supports the native Gaussian schema. Scale is explicitly marked
+uncalibrated. JSON descriptions and Cosmos are not required to open the scene.
+
+In the viewport, use **Capture Camera** at two or more viewpoints, reorder the
+captures, then click **Preview Path**. This saves the custom path to
+`usd/active_camera.json`, writes the animated `usd/digital_twin_scene.usda`, and
+updates the Nerfstudio render path. Applying a preset selects that preset
+instead. Camera staging preserves the selected path. Captured stops currently
+use three seconds per segment and the first camera's field of view; this is not
+a timeline editor. Paths do not yet avoid collisions with scene surfaces.
+
+USD animation and viewport playback share the sampled trajectory, lens and
+camera-up direction. Retrace reads archived camera poses and trainer
+normalization; remote render paths undo any recorded post-training gravity
+rotation. Remote MP4 rendering still requires its checkpoint/image environment
+and a separately approved compute job.
+
+Future DA3-Streaming workers retain depth/confidence outputs, intermediate and
+debug data, camera poses, config and frame ordering under `streaming/` in the
+stage output. The downloader preserves nested directories, including duplicate
+filenames in different folders. Partial files can be recovered after an ordinary
+worker failure if the upload wrapper completes; abrupt container termination
+can still prevent upload. Model weights are not copied into the artifact tree.
+
+### Launchers
+
 - `python gui_app.py` — Desktop Digital Twin Studio app (GUI).
 - `python tools/headless_remote_run.py --preset draft --yes` — Headless end-to-end run, dispatches a real HF Job for reconstruction.
 - `python tools/headless_remote_run.py --resume-job <job-id> --yes` — Re-queue a failed job reusing already-uploaded HF frames (no re-upload cost).

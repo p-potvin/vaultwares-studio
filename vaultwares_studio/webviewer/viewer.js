@@ -210,6 +210,11 @@ window.playPath = function playPath(framesJson, fps) {
       return;
     }
     viewer.camera.position.set(frame.position[0], frame.position[1], frame.position[2]);
+    if (frame.up) viewer.camera.up.set(...frame.up);
+    if (frame.fovDegrees) {
+      viewer.camera.fov = frame.fovDegrees;
+      viewer.camera.updateProjectionMatrix();
+    }
     if (viewer.controls) {
       viewer.controls.target.set(frame.lookAt[0], frame.lookAt[1], frame.lookAt[2]);
       viewer.controls.update();
