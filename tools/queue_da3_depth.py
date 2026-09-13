@@ -25,6 +25,7 @@ it; without ``--yes`` nothing is submitted.
 from __future__ import annotations
 
 import argparse
+import json
 import sys
 import zipfile
 from pathlib import Path
@@ -45,6 +46,25 @@ from vaultwares_studio.runners import (  # noqa: E402
     HfJobsStageRunner,
     StageContext,
 )
+
+
+def package_worker(staging: Path) -> Path:
+    """The worker overlay: today's entrypoint, run by an image built in July.
+
+    The deployed vw-studio-da3 image predates the depth bundle entirely — a run
+    against it completes, returns processed_min.zip, and writes a summary with
+    no `depth_maps` key, because its --sfm-only branch never calls
+    make_depth_bundle. That cost a real job to discover. Overlaying the current
+    file is the same trick prepare_zerogpu_training.py uses: ~20 KB uploaded,
+    no image rebuild.
+    """
+    staging.mkdir(parents=True, exist_ok=True)
+    target = staging / "worker.zip"
+    with zipfile.ZipFile(target, "w", zipfile.ZIP_DEFLATED) as worker:
+        worker.write(ROOT / "docker/worker/da3_entrypoint.py", "da3_entrypoint.py")
+        worker.write(ROOT / "vaultwares_studio/streaming_convert.py", "streaming_convert.py")
+        worker.write(ROOT / "vaultwares_studio/camera_calibration.py", "camera_calibration.py")
+    return target
 
 
 def main() -> int:
@@ -91,17 +111,24 @@ def main() -> int:
             return 1
         image = image.format(owner=owner)
 
-    command = [
-        "python", "/opt/vw/da3_entrypoint.py",
+    job_dir = args.job
+    worker_zip = package_worker(job_dir / "staging")
+    # Unpack the overlay over /opt/vw, then exec the entrypoint from there.
+    bootstrap = (
+        "import os,sys,zipfile; "
+        "zipfile.ZipFile(os.path.join(os.environ['VW_IN'],'worker.zip')).extractall('/opt/vw'); "
+        "os.execv(sys.executable,[sys.executable,'/opt/vw/da3_entrypoint.py',*sys.argv[1:]])"
+    )
+    entry = [
         "--sfm-only",
         "--downscale", "1",
         "--max-sfm-frames", str(args.max_frames),
         "--da3-model", args.da3_model or preset.da3_model,
     ]
+    command = ["python", "-c", bootstrap, *entry]
     # No --calibration here: this job is run for its depth maps, and a lens
     # calibration only affects the transforms.json that the hybrid discards.
     # Passing one would mean shipping the file into the container for no gain.
-    job_dir = args.job
     (job_dir / "reconstruction" / "remote_out").mkdir(parents=True, exist_ok=True)
     remote_out = job_dir / "reconstruction" / "remote_out"
 
@@ -131,11 +158,11 @@ def main() -> int:
             "extra_repo_inputs": [],
             "flavor_scheduling_timeout_seconds": args.scheduling_timeout,
         },
-        inputs=[args.frames],
+        inputs=[args.frames, worker_zip],
         # depths.zip is the point of this job. processed_min.zip comes along and
         # is discarded by the hybrid — waiting on the depth bundle is what says
         # the run was useful.
-        expected_outputs=[remote_out / "depths.zip"],
+        expected_outputs=[job_dir / "reconstruction_sfm" / "remote_out" / "depths.zip"],
         log=lambda msg: print(f"[da3-depth:hf] {msg}"),
         cancel=CancelToken(),
         skip_inputs_upload=False,
