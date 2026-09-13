@@ -101,6 +101,7 @@ def _package_worker(staging: Path) -> Path:
     with zipfile.ZipFile(target, "w", zipfile.ZIP_DEFLATED) as worker:
         worker.write(ROOT / "docker/worker/da3_entrypoint.py", "da3_entrypoint.py")
         worker.write(ROOT / "vaultwares_studio/streaming_convert.py", "streaming_convert.py")
+        worker.write(ROOT / "vaultwares_studio/camera_calibration.py", "camera_calibration.py")
         worker.write(ROOT / "tools/run_train_only_with_retention.py", "run_train_only_with_retention.py")
     return target
 

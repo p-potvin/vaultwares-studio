@@ -35,8 +35,12 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 import numpy as np
+
+if TYPE_CHECKING:
+    from .camera_calibration import CameraCalibration
 
 # Right-multiplying a c2w by this converts OpenCV camera axes to OpenGL.
 OPENCV_TO_OPENGL = np.diag([1.0, -1.0, -1.0, 1.0])
@@ -158,13 +162,32 @@ def streaming_to_transforms(
     stream_size: tuple[int, int],
     original_size: tuple[int, int],
     ply_file_path: str = "sparse_pc.ply",
+    calibration: "CameraCalibration | None" = None,
 ) -> dict:
     """Build the nerfstudio transforms.json payload.
 
     ``image_names`` must be in the same order streaming consumed them — it sorts
     the input directory, so sorted order is the contract.
     ``stream_size`` / ``original_size`` are ``(width, height)``.
+
+    Intrinsics are emitted as ONE shared camera at the top level rather than per
+    frame. DA3 estimates a focal length independently for every frame and they
+    disagree by ~4% on a phone whose lens never moved; handing splatfacto that
+    disagreement is handing it frames that cannot all be right. See
+    ``camera_calibration`` for the measurement.
+
+    ``calibration`` optionally supplies the lens — distortion above all, which
+    DA3 never estimates. Its focal/principal point win over DA3's consensus when
+    given, because a bundle-adjusted calibration is the better measurement of
+    the same physical thing.
     """
+    # This module is also shipped flat into the job container (no package), so
+    # the relative import has to degrade to a plain one. The packers in tools/
+    # copy camera_calibration.py alongside it for exactly this reason.
+    try:
+        from .camera_calibration import CameraCalibration, consensus_intrinsics
+    except ImportError:  # pragma: no cover - container layout
+        from camera_calibration import CameraCalibration, consensus_intrinsics
     poses, intrinsics = load_streaming_poses(stream_dir)
     validate_poses(poses)
     validate_principal_point(intrinsics, stream_size)
@@ -180,31 +203,37 @@ def streaming_to_transforms(
     scale_x = orig_w / stream_w
     scale_y = orig_h / stream_h
 
-    frames = []
-    for i, name in enumerate(image_names):
-        # Already camera-to-world: do NOT invert. Only rebase the axes.
-        c2w_opengl = poses[i] @ OPENCV_TO_OPENGL
-        fx, fy, cx, cy = intrinsics[i]
-        frames.append(
-            {
-                "file_path": f"images/{name}",
-                "transform_matrix": c2w_opengl.tolist(),
-                "fl_x": float(fx) * scale_x,
-                "fl_y": float(fy) * scale_y,
-                "cx": float(cx) * scale_x,
-                "cy": float(cy) * scale_y,
-                "w": int(orig_w),
-                "h": int(orig_h),
-            }
+    consensus = consensus_intrinsics(intrinsics, stream_size)
+    if calibration is not None:
+        camera = calibration.scaled_to(orig_w, orig_h)
+    else:
+        camera = CameraCalibration(
+            fl_x=consensus.fl_x * scale_x,
+            fl_y=consensus.fl_y * scale_y,
+            cx=consensus.cx * scale_x,
+            cy=consensus.cy * scale_y,
+            w=orig_w,
+            h=orig_h,
+            source=f"DA3-Streaming consensus over {consensus.frames} frames",
         )
 
-    fx0, _, cx0, _ = intrinsics[0]
-    camera_angle_x = float(2.0 * np.arctan2(cx0, fx0))
-    return {
-        "camera_angle_x": camera_angle_x,
-        "frames": frames,
-        "ply_file_path": ply_file_path,
-    }
+    frames = [
+        {
+            "file_path": f"images/{name}",
+            # Already camera-to-world: do NOT invert. Only rebase the axes.
+            "transform_matrix": (poses[i] @ OPENCV_TO_OPENGL).tolist(),
+        }
+        for i, name in enumerate(image_names)
+    ]
+
+    payload = camera.as_transforms_fields()
+    payload["camera_angle_x"] = float(2.0 * np.arctan2(camera.cx, camera.fl_x))
+    payload["frames"] = frames
+    payload["ply_file_path"] = ply_file_path
+    # Provenance, not configuration: nerfstudio ignores unknown top-level keys,
+    # and this is the record of what the per-frame disagreement cost.
+    payload["vw_intrinsics_consensus"] = consensus.as_dict()
+    return payload
 
 
 def write_processed_bundle(
@@ -214,6 +243,7 @@ def write_processed_bundle(
     *,
     stream_size: tuple[int, int] | None,
     original_size: tuple[int, int],
+    calibration: "CameraCalibration | None" = None,
 ) -> tuple[Path, Path]:
     """Write transforms.json + sparse_pc.ply into ``output_dir``.
 
@@ -235,6 +265,7 @@ def write_processed_bundle(
         image_names,
         stream_size=stream_size,
         original_size=original_size,
+        calibration=calibration,
     )
     transforms_path = output_dir / "transforms.json"
     transforms_path.write_text(json.dumps(transforms, indent=2), encoding="utf-8")

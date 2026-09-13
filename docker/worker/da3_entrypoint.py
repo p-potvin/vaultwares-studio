@@ -124,22 +124,46 @@ def da3_inference(
     return result
 
 
+def load_calibration(path: str | None, log=print) -> dict | None:
+    """Read a lens calibration JSON, or None when none was given.
+
+    Deliberately permissive about extra keys — the file is also a
+    ``CameraCalibration`` dump from vaultwares_studio, which carries provenance
+    fields the container has no use for.
+    """
+    if not path:
+        return None
+    data = json.loads(Path(path).read_text(encoding="utf-8"))
+    terms = {k: float(data.get(k, 0.0)) for k in ("k1", "k2", "p1", "p2")}
+    if not any(terms.values()):
+        log(f"Calibration {path} has no non-zero distortion terms; ignoring it.")
+        return None
+    log(f"Loaded lens calibration from {path}: {terms}")
+    return data
+
+
 def da3_to_transforms(
     prediction: dict,
     images: list[Path],
     images_dir: Path,
     output_dir: Path,
+    calibration: dict | None = None,
 ) -> Path:
     """Convert DA3 output to nerfstudio transforms.json format.
 
     DA3 gives us:
       - extrinsics: (N, 3, 4) world-to-camera in OpenCV convention
-      - intrinsics: (N, 3, 3) camera intrinsics
+      - intrinsics: (N, 3, 3) camera intrinsics, estimated independently per frame
 
     Nerfstudio transforms.json expects:
       - per-frame transform_matrix: 4x4 camera-to-world in OpenGL/Blender convention
-      - fl_x, fl_y, cx, cy, w, h per frame
+      - fl_x, fl_y, cx, cy, w, h — top level for a shared camera, which is what
+        we write, or per frame to override it, which we deliberately do not
       - file_path relative to data root
+
+    ``calibration`` optionally carries k1/k2/p1/p2 for the lens. DA3 does not
+    estimate distortion, and without these keys nerfstudio's undistortion never
+    runs.
     """
     exts = prediction["extrinsics"]  # (N, 3, 4) w2c
     ixts = prediction["intrinsics"]  # (N, 3, 3)
@@ -148,6 +172,7 @@ def da3_to_transforms(
 
     n_frames = len(images)
     frames = []
+    per_frame: list[tuple[float, float, float, float]] = []
 
     # DA3 resizes images internally; we need to scale intrinsics back to
     # the original image resolution so nerfstudio can load the full-res files.
@@ -177,29 +202,55 @@ def da3_to_transforms(
         cx = float(ixt[0, 2]) * scale_x
         cy = float(ixt[1, 2]) * scale_y
 
-        h, w = orig_h, orig_w
+        per_frame.append((fl_x, fl_y, cx, cy))
+        frames.append(
+            {
+                "file_path": f"images/{images[i].name}",
+                "transform_matrix": c2w_opengl.tolist(),
+            }
+        )
 
-        frame = {
-            "file_path": f"images/{images[i].name}",
-            "transform_matrix": c2w_opengl.tolist(),
-            "fl_x": fl_x,
-            "fl_y": fl_y,
-            "cx": cx,
-            "cy": cy,
-            "w": int(w),
-            "h": int(h),
-        }
-        frames.append(frame)
-
-    # Use first frame's intrinsics as the applied scale reference
-    first_ixt = ixts[0]
-    camera_angle_x = float(2 * np.arctan2(first_ixt[0, 2], first_ixt[0, 0]))
+    # ONE camera, not N. DA3 estimates intrinsics independently per frame, and
+    # on backyard_134s_sunny.mp4 the focal ranged 881.7..915.1 px for a phone
+    # whose lens never moved — a 3.75% spread. splatfacto takes those numbers as
+    # ground truth, so the frames disagree about where a world point projects
+    # and the gaussians blur until they satisfy none of them. Median because a
+    # frame with no focal signal (mostly sky) should not move the consensus.
+    # See vaultwares_studio/camera_calibration.py for the full measurement; this
+    # file ships alone in the job container and cannot import it.
+    per_frame_arr = np.asarray(per_frame, dtype=np.float64)
+    fl_x, fl_y, cx, cy = (float(np.median(per_frame_arr[:, i])) for i in range(4))
+    fl_spread = float(per_frame_arr[:, 0].max() - per_frame_arr[:, 0].min()) / fl_x
+    log(
+        f"Shared camera: fl_x={fl_x:.2f} fl_y={fl_y:.2f} cx={cx:.1f} cy={cy:.1f} "
+        f"(per-frame focal spread {fl_spread * 100:.2f}% collapsed to the median)"
+    )
 
     transforms = {
-        "camera_angle_x": camera_angle_x,
+        "camera_model": "OPENCV",
+        "fl_x": fl_x,
+        "fl_y": fl_y,
+        "cx": cx,
+        "cy": cy,
+        "w": int(orig_w),
+        "h": int(orig_h),
+        "camera_angle_x": float(2 * np.arctan2(cx, fl_x)),
         "frames": frames,
         "ply_file_path": "sparse_pc.ply",
     }
+
+    # DA3 never estimates lens distortion. nerfstudio's full_images_datamanager
+    # WILL undistort every image at load time, but only when these keys exist
+    # and are non-zero — on a DA3 bundle that path has never run. The lens is a
+    # property of the phone, not the capture, so it is solved once by COLMAP and
+    # carried in via --calibration. Coefficients are in normalised image
+    # coordinates and so are resolution-independent: never scale them with fl.
+    if calibration:
+        for key in ("k1", "k2", "p1", "p2"):
+            if calibration.get(key):
+                transforms[key] = float(calibration[key])
+        log(f"Applied lens distortion from calibration: "
+            f"{ {k: transforms[k] for k in ('k1', 'k2', 'p1', 'p2') if k in transforms} }")
 
     transforms_path = output_dir / "transforms.json"
     transforms_path.write_text(json.dumps(transforms, indent=2), encoding="utf-8")
@@ -497,6 +548,10 @@ def run_stream_sfm(
 
     sys.path.insert(0, "/opt/vw")
     from streaming_convert import write_processed_bundle
+    try:
+        from camera_calibration import CameraCalibration
+    except ImportError:  # running against the repo rather than the flat image
+        from vaultwares_studio.camera_calibration import CameraCalibration
 
     if not STREAMING_DIR.is_dir():
         return fail(out_dir, "missing_streaming", f"{STREAMING_DIR} not present in image")
@@ -622,10 +677,15 @@ def run_stream_sfm(
     # Streaming sorts its input directory, so sorted order is the contract.
     names = [p.name for p in sorted(resized.glob("*"))]
     try:
+        calib = load_calibration(args.calibration, log)
         write_processed_bundle(
             stream_out, names, processed,
             stream_size=(stream_w, stream_h),
             original_size=(orig_w, orig_h),
+            calibration=CameraCalibration(**{
+                k: v for k, v in calib.items()
+                if k in CameraCalibration.__dataclass_fields__
+            }) if calib else None,
         )
     except Exception as exc:  # noqa: BLE001
         return fail(out_dir, "convert_failed", str(exc))
@@ -816,6 +876,12 @@ def main() -> int:  # noqa: PLR0911, PLR0915
     parser.add_argument(
         "--icp-max-distance", type=float, default=0.5,
         help="ICP max correspondence distance for alignment (0 = skip alignment).",
+    )
+    parser.add_argument(
+        "--calibration",
+        help="Path to a lens calibration JSON (k1/k2/p1/p2, optionally fl_x/fl_y/cx/cy). "
+             "DA3 never estimates distortion, and nerfstudio only undistorts when these "
+             "keys are present and non-zero. Solve it once per phone with COLMAP.",
     )
     parser.add_argument(
         "--max-sfm-frames", type=int, default=80,
@@ -1067,7 +1133,8 @@ def main() -> int:  # noqa: PLR0911, PLR0915
     timings["da3_inference_s"] = round(time.monotonic() - started, 1)
 
     # Convert DA3 output to nerfstudio format (use sfm_frames — prediction only has these)
-    da3_to_transforms(prediction, sfm_frames, images, processed)
+    da3_to_transforms(prediction, sfm_frames, images, processed,
+                      calibration=load_calibration(args.calibration, log))
     da3_to_sparse_pc(prediction, processed)
     # Depth + confidence fields are kept as their own artifact. They are NOT
     # referenced from transforms.json — pointing splatfacto at them is what

@@ -160,16 +160,19 @@ def test_intrinsics_scale_from_stream_to_original_resolution(tmp_path):
     t = streaming_to_transforms(
         tmp_path, ["a.jpg"], stream_size=(504, 280), original_size=(1920, 1080)
     )
-    f = t["frames"][0]
     sx, sy = 1920 / 504, 1080 / 280
-    assert f["fl_x"] == pytest.approx(100.0 * sx)
-    assert f["fl_y"] == pytest.approx(110.0 * sy)
-    assert f["cx"] == pytest.approx(252.0 * sx)
-    assert f["cy"] == pytest.approx(140.0 * sy)
+    # One shared camera at the top level, the way COLMAP writes it — not N
+    # cameras, one per frame. See camera_calibration for why.
+    assert t["fl_x"] == pytest.approx(100.0 * sx)
+    assert t["fl_y"] == pytest.approx(110.0 * sy)
+    assert t["cx"] == pytest.approx(252.0 * sx)
+    assert t["cy"] == pytest.approx(140.0 * sy)
     # Principal point stays centred, which is the sanity check that matters.
-    assert f["cx"] == pytest.approx(960.0)
-    assert f["cy"] == pytest.approx(540.0)
-    assert (f["w"], f["h"]) == (1920, 1080)
+    assert t["cx"] == pytest.approx(960.0)
+    assert t["cy"] == pytest.approx(540.0)
+    assert (t["w"], t["h"]) == (1920, 1080)
+    # Per-frame intrinsics would override the shared camera; there must be none.
+    assert set(t["frames"][0]) == {"file_path", "transform_matrix"}
 
 
 def test_frame_order_and_paths_follow_the_supplied_names(tmp_path):
@@ -246,6 +249,6 @@ def test_write_bundle_infers_size_and_centres_the_principal_point(tmp_path):
     transforms_path, _ = write_processed_bundle(
         stream, ["a.jpg"], tmp_path / "out", stream_size=(672, 378), original_size=(1920, 1080)
     )
-    frame = json.loads(transforms_path.read_text())["frames"][0]
-    assert frame["cx"] == pytest.approx(960.0) and frame["cy"] == pytest.approx(540.0)
-    assert frame["fl_x"] == pytest.approx(430.0 * 1920 / 504)
+    payload = json.loads(transforms_path.read_text())
+    assert payload["cx"] == pytest.approx(960.0) and payload["cy"] == pytest.approx(540.0)
+    assert payload["fl_x"] == pytest.approx(430.0 * 1920 / 504)

@@ -164,6 +164,7 @@ def submit(output: Path, manifest: dict, flavors: list[str], scheduling_timeout:
     with zipfile.ZipFile(output / "worker.zip", "w", zipfile.ZIP_DEFLATED) as worker:
         worker.write(ROOT / "docker/worker/da3_entrypoint.py", "da3_entrypoint.py")
         worker.write(ROOT / "vaultwares_studio/streaming_convert.py", "streaming_convert.py")
+        worker.write(ROOT / "vaultwares_studio/camera_calibration.py", "camera_calibration.py")
     overlay = (
         "import os,sys,zipfile; "
         "zipfile.ZipFile(os.path.join(os.environ['VW_IN'],'worker.zip')).extractall('/opt/vw'); "

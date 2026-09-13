@@ -30,6 +30,7 @@ def package_worker(output: Path) -> str:
     with zipfile.ZipFile(output / "worker.zip", "w", zipfile.ZIP_DEFLATED) as archive:
         archive.write(ROOT / "docker/worker/da3_entrypoint.py", "da3_entrypoint.py")
         archive.write(ROOT / "vaultwares_studio/streaming_convert.py", "streaming_convert.py")
+        archive.write(ROOT / "vaultwares_studio/camera_calibration.py", "camera_calibration.py")
         archive.write(ROOT / "tools/run_prepared_da3.py", "run_prepared_da3.py")
     return sha256(output / "worker.zip")
 
