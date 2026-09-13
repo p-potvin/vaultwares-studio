@@ -33,18 +33,31 @@ from core import selected_frame_indices  # noqa: E402  (the console's own select
 
 DA3_IMAGE = "hf.co/spaces/clopeux/vw-studio-da3"
 
-# Train args, and the one that matters: **stop_split_at must track the
-# iteration count.** splatfacto defaults it to 15000. The 13 Sep run asked for
-# 20000 iterations and left the default, so its last 5000 iterations densified
-# nothing and only culled, with alpha resets at 15000 and 18000 feeding the
-# pruner. Measured against July (15000 iterations, stop_split_at 15000, growth
-# to the final step): July's splat reached 3.84x its camera-path extent, the
-# 13 Sep one reached 0.51x, from seed clouds of the same shape (1.19x vs
-# 1.14x). Everything past the walk was grown and then thrown away.
+# Train args. Two knobs here, and the history of getting them wrong is worth
+# keeping because the obvious explanation was the wrong one.
 #
-# Scale regularisation was tried on 13 Sep and is dropped: it is unproven here,
-# and the August run without it came out just as narrow, so it is not what
-# separates the two.
+# `stop_split_at` must track the iteration count: splatfacto defaults it to
+# 15000, so a 20000-iteration run densifies for 15000 and then spends 5000
+# iterations culling with nothing growing back. That is real and is fixed here.
+#
+# It is NOT, however, what made the 13 Sep splat narrow. Measured afterwards:
+#
+#   run              views  iters  stop_split  gaussians  extent/path
+#   july              80    15000    15000     1,839,412     3.84
+#   august           500    15000    15000       956,304       ?
+#   13 Sep first     500    20000    15000     1,036,140     0.51
+#   13 Sep refine    500    45000    40500       619,395     0.52
+#
+# Both 500-view runs land near a million whether or not they had a culling
+# tail, and the 45000-iteration refine — densifying all the way to 40500 —
+# came out *smaller* and no wider. Densification splits gaussians that already
+# exist; it cannot invent them where the far field was already pruned. So the
+# separator is the view count, not this flag: with 500 views every gaussian has
+# to satisfy far more observations, and the far field is exactly where DA3's
+# depth and poses are least reliable, so that is what gets culled.
+#
+# Scale regularisation was tried on 13 Sep and is dropped: unproven, and the
+# August run without it was just as narrow.
 SPLIT_FRACTION = 0.9
 
 
@@ -92,7 +105,7 @@ def _package_worker(staging: Path) -> Path:
     return target
 
 
-def prepare(job_dir: Path, candidates_dir: Path, staging: Path) -> dict:
+def prepare(job_dir: Path, candidates_dir: Path, staging: Path, subsample: int = 1) -> dict:
     manifest = json.loads((job_dir / "manifest.json").read_text(encoding="utf-8"))
     meta = manifest["metadata"]
     frame_count = int(meta["frame_count"])
@@ -102,22 +115,32 @@ def prepare(job_dir: Path, candidates_dir: Path, staging: Path) -> dict:
     transforms = json.loads((processed / "transforms.json").read_text(encoding="utf-8"))
     if len(transforms["frames"]) != len(selected):
         raise SystemExit(f"{len(transforms['frames'])} poses vs {len(selected)} selected frames")
+    if subsample > 1:
+        # Keep every Nth posed frame. The poses are untouched — this changes
+        # only how many views supervise training, which is the variable that
+        # actually separated the wide July splat from the narrow 500-view ones.
+        order = sorted(range(len(selected)),
+                       key=lambda i: transforms["frames"][i]["file_path"])
+        keep = sorted(order[::subsample])
+        transforms = {**transforms, "frames": [transforms["frames"][i] for i in keep]}
+        selected = [selected[i] for i in keep]
     frames_zip = staging / "frames.zip"
     bundle = staging / "processed_min.zip"
     name_map = {}
     with zipfile.ZipFile(frames_zip, "w", zipfile.ZIP_STORED) as frames_archive, \
             zipfile.ZipFile(bundle, "w", zipfile.ZIP_STORED) as bundle_archive:
-        bundle_archive.write(processed / "transforms.json", "transforms.json")
+        bundle_archive.writestr("transforms.json", json.dumps(transforms, indent=1))
         bundle_archive.write(processed / "sparse_pc.ply", "sparse_pc.ply")
         for index, source in enumerate(selected):
-            name = f"frame_{index:05d}.jpg"
+            name = Path(transforms["frames"][index]["file_path"]).name
             name_map[name] = source.name
             frames_archive.write(source, name)
             bundle_archive.write(source, f"images/{name}")
         bundle_archive.writestr("frame_name_map.json", json.dumps(name_map, indent=2))
     _package_worker(staging)
     report = {
-        "job_id": manifest["job_id"], "frames": len(selected), "candidates": len(list(candidates_dir.glob("*.jpg"))),
+        "job_id": manifest["job_id"], "frames": len(selected), "subsample": subsample,
+        "candidates": len(list(candidates_dir.glob("*.jpg"))),
         "first_frame": selected[0].name, "last_frame": selected[-1].name,
         "frames_zip_bytes": frames_zip.stat().st_size, "bundle_bytes": bundle.stat().st_size,
         "intrinsics_size": meta.get("intrinsics_size"), "fl_x": transforms["frames"][0]["fl_x"],
@@ -245,6 +268,9 @@ def main() -> int:
     parser.add_argument("--candidates", type=Path, help="folder of ffmpeg fps=N candidates (fresh runs only)")
     parser.add_argument("--staging", type=Path, help="where the bundles go (default: <job>/training_input)")
     parser.add_argument("--iterations", type=int, default=15_000)
+    parser.add_argument("--subsample", type=int, default=1,
+                        help="train on every Nth posed view (poses unchanged). 6 turns 500 views "
+                             "into 84, which is July's configuration.")
     parser.add_argument("--flavor", action="append", help="flavor candidates in order; default l4x1 then a10g-small")
     parser.add_argument("--scheduling-timeout", type=float, default=600.0)
     parser.add_argument("--submit", action="store_true", help="run the paid training job after preparing")
@@ -268,7 +294,7 @@ def main() -> int:
         if not args.submit:
             return 0
         return submit(job_dir, staging, args.iterations, flavors, args.scheduling_timeout, refine=True)
-    report = prepare(job_dir, args.candidates, staging)
+    report = prepare(job_dir, args.candidates, staging, subsample=args.subsample)
     print(json.dumps(report, indent=2))
     if not args.submit:
         return 0

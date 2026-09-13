@@ -282,3 +282,46 @@ overcast, same day — 400 frames each, 800 total, loop closure on, `a10g-small`
 The open question is whether the two captures actually register into one map;
 that is what this job answers.
 
+
+## Correction: it was the view count, not `stop_split_at`
+
+The section above blames splatfacto's `stop_split_at` default for the narrow
+splat. **That was wrong**, and the experiment that was supposed to confirm it
+disproved it instead.
+
+The refine ran 20000 -> 45000 with `stop_split_at` at 40500, so densification
+was live for 20500 iterations that the first run never had. It came back with
+**619,395 gaussians, down from 1,036,140**, and an extent of **0.52x** the
+camera path against the first run's 0.51x. No wider, and 40% smaller.
+
+| run | views | iters | stop_split | gaussians | extent / path |
+|---|---:|---:|---:|---:|---:|
+| July `da3-standard` | 80 | 15000 | 15000 | 1,839,412 | **3.84** |
+| August `da3-stream` | 500 | 15000 | 15000 | 956,304 | — |
+| 13 Sep first | 500 | 20000 | 15000 | 1,036,140 | **0.51** |
+| 13 Sep refine | 500 | 45000 | 40500 | 619,395 | **0.52** |
+
+Both 500-view runs land near a million whether or not they had a culling tail.
+The 80-view run is nearly twice that and reaches almost eight times further
+from the walk. `stop_split_at` is a real bug and is fixed, but it is not what
+separates these.
+
+Two things follow, and the second is the useful one:
+
+**Densification cannot restore what was culled.** Splitting divides gaussians
+that already exist; where the far field has been pruned there is nothing to
+split and no gradient to drive it. So refinement adds detail where geometry
+survives and will not recover coverage. That answers "can more training be
+incremental" honestly: mechanically yes, and it is nearly free to stage, but
+not as a repair for missing coverage.
+
+**More views means more culling pressure.** With 500 views every gaussian must
+be consistent with six times as many observations, and the far field is exactly
+where DA3's depth is least confident and its poses drift most. Those gaussians
+cannot satisfy 500 views, so they go. With 80 sparse views they are weakly
+constrained and survive — which is also a warning that July's generous far
+field may be partly unearned.
+
+The test: the same poses and the same corrected intrinsics, subsampled to every
+sixth view, 15000 iterations. One variable against July. `--subsample` exists
+for it.
