@@ -1,4 +1,4 @@
-<!-- v1.1.0 -->
+<!-- v1.2.0 -->
 # The hybrid: COLMAP geometry, DA3 density
 
 > Sun, 13 Sep 2026. Written after the resolution audit that found the near-field
@@ -41,12 +41,15 @@ in one consistent frame. Where a sparse point lands in a frame we get a pair
 
 `vaultwares_studio/hybrid_seed.py` does this, with three decisions worth knowing:
 
-- **Robust, not least-squares.** A sparse point that projects into a frame is not
-  necessarily *visible* in it — it can sit behind a wall, and an occluded point
-  always reads too far. The outlier tail is one-sided, which plain least squares
-  cannot survive. IRLS with a Huber loss, threshold re-derived each iteration
-  from the median absolute residual (scene scale is arbitrary, so a threshold in
-  metres means something different every run).
+- **Visibility first, robustness second.** A sparse point that projects into a
+  frame is not necessarily *visible* in it — it can sit behind a wall, and an
+  occluded point always reads too far. Correspondences therefore come from
+  COLMAP's tracks (`colmap_model.py`), not from projecting the cloud. The Huber
+  IRLS stays on top, threshold re-derived each iteration from the median absolute
+  residual (scene scale is arbitrary, so a fixed threshold in metres means
+  something different every run), but it is cleaning up a genuine tail rather
+  than being asked to find the signal. Getting this order wrong is the first bug
+  recorded below.
 - **Affine and scale-only, both reported.** A pure scale is the right model for a
   metric predictor. If the shift is consistently doing real work
   (`shift_matters_fraction` high), DA3's depth is *relative* on this scene, not
@@ -55,10 +58,10 @@ in one consistent frame. Where a sparse point lands in a frame we get a pair
   depth does not merely add nothing. It adds a whole surface in the wrong place,
   and splatfacto will dutifully fit gaussians to it.
 
-Measured against the June 14 bundle: the median frame has **45,966** sparse
-points projecting into it (worst 6,089), so the fit is over-constrained by three
-orders of magnitude. `MIN_CORRESPONDENCES = 24` is a guard against a degenerate
-frame, not a tuning knob.
+Measured against the June 14 COLMAP model (`sparse/0`: 49,107 points, 487
+frames): the median frame has **577** verified observations, the worst 36.
+`MIN_CORRESPONDENCES = 24` is a guard against a degenerate frame — sky, a blank
+wall, a pose that came out wrong — not a tuning knob.
 
 ### Verified end to end
 
@@ -76,13 +79,11 @@ points_after_dedup      282,709     from 40 frames at stride 4
 
 All four steps exist today; the hybrid is a composition, not new plumbing.
 
-**1. COLMAP poses.** Any `SfmMethod.COLMAP` preset. For
-`backyard_134s_sunny.mp4` this is already done — June 14's bundle is on disk
-with its database and sparse model retained:
-
-```bash
-ls "D:/3D Reconstruction/vaultwares-studio-jobs/data/jobs/local-run-20260614-234541/reconstruction/remote_out/processed_min.zip"
-```
+**1. COLMAP poses — and its full `sparse/0`, from the same run.** Any
+`SfmMethod.COLMAP` preset. The transforms, the points and the tracks must come
+from one reconstruction; COLMAP's gauge is arbitrary per run, so mixing two is
+meaningless. June 14's bundle does **not** satisfy this (see below), so this
+step currently has to be re-run.
 
 **2. DA3 depth** on the same frames. `--sfm-only` already writes `depths.zip`
 (per-frame `.npy` named by source stem) alongside `processed_min.zip`. Only the
@@ -92,8 +93,11 @@ depth is used; DA3's poses and intrinsics are discarded.
 free too — which is the point of doing it outside the job:
 
 ```bash
-python tools/build_hybrid_seed.py --colmap <colmap_processed_min.zip> --depths <depths_dir> --out data/jobs/<job>/hybrid --stride 2 --voxel 0.02
+python tools/build_hybrid_seed.py --colmap <processed_min.zip> --sparse-model <sparse/0> --depths <depths_dir> --out data/jobs/<job>/hybrid --stride 2 --voxel 0.02
 ```
+
+`--sparse-model` is not optional in practice. Without it the tool falls back to
+projecting the whole cloud and warns; that fallback is known to be wrong.
 
 **4. Train** against the hybrid bundle with `tools/queue_train_only.py`.
 
