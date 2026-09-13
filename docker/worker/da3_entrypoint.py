@@ -486,10 +486,14 @@ def make_depth_bundle(processed: Path, output_path: Path) -> Path | None:
 
     Kept deliberately separate from processed_min.zip: that archive is the
     SfM -> training handoff and stays small (~8 MB) because both legs pay to
-    transfer it. The depth and confidence fields are a genuine DA3 output that
-    nothing downstream consumes yet, so they ride in their own artifact rather
-    than being discarded inside the container. The runner downloads everything
-    under out/, so this lands in <stage>/remote_out/depths.zip automatically.
+    transfer it. The depth and confidence fields ride in their own artifact
+    rather than being discarded inside the container. The runner downloads
+    everything under out/, so this lands in <stage>/remote_out/depths.zip
+    automatically.
+
+    These are no longer unused: the hybrid path (tools/build_hybrid_seed.py)
+    consumes exactly this bundle, aligning each map against COLMAP's sparse
+    points to build a dense seed cloud in COLMAP's frame.
     """
     members: list[tuple[Path, str]] = []
     for folder in ("depths", "confidence"):
