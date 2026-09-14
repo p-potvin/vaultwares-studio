@@ -1006,8 +1006,24 @@ def main() -> int:  # noqa: PLR0911, PLR0915
         if vtm.returncode != 0:
             print(f"[recon] vocab_tree_matcher non-fatal failure: exit={vtm.returncode}", flush=True)
 
-    # 3. Mapper (single model — multiple_models=0 to keep it simple). Writes
-    # to colmap/sparse/0/.
+    # 3. Mapper. multiple_models stays ON, which is COLMAP's default and is
+    # what makes the run survivable.
+    #
+    # This was 0, "to keep it simple". What it actually does is remove the
+    # mapper's only recovery path: if initialisation picks a pair that cannot
+    # be extended, the model stalls at two or three images and the mapper stops
+    # rather than abandoning it and seeding again elsewhere. Measured on
+    # backyard_134s_sunny.mp4 — 500 frames, median 11,486 keypoints each,
+    # 9,429 verified pairs with >=15 inliers, a better match graph than the run
+    # that worked — it registered 2/500 and failed the job.
+    #
+    # The June 14 run of the same footage went through ns-process-data, which
+    # leaves the default on, and its project still holds the proof: sparse/0
+    # with 487 images AND sparse/1 with 10. It hit the same dead initialisation
+    # and simply started over.
+    #
+    # Allowing several models needs the right one picked afterwards, which is
+    # what _largest_sparse_model does.
     sparse_root = colmap_dir / "sparse"
     sparse_root.mkdir(parents=True, exist_ok=True)
     mp = run([
@@ -1015,7 +1031,6 @@ def main() -> int:  # noqa: PLR0911, PLR0915
         "--database_path", str(db_path),
         "--image_path", str(images_dir),
         "--output_path", str(sparse_root),
-        "--Mapper.multiple_models", "0",
     ])
     if mp.returncode != 0:
         # Don't fail yet — retry_mapper below tries init-pair smart picks.
@@ -1024,13 +1039,18 @@ def main() -> int:  # noqa: PLR0911, PLR0915
     # 4. Convert COLMAP sparse model → transforms.json + sparse_pc.ply via
     # ns-process-data with --skip-colmap (its dataparser writer; we keep the
     # nerfstudio output format consistent with refine mode's regen step).
+    # Not "colmap/sparse/0": with several models the biggest is often 1 or 2,
+    # and pointing at 0 regardless would regenerate transforms.json from a
+    # fragment while a complete model sat next to it.
+    largest = _largest_sparse_model(processed)
+    model_arg = str(largest.relative_to(processed)) if largest else "colmap/sparse/0"
     regen = run([
         "ns-process-data", "images",
         "--data", str(images_dir),
         "--output-dir", str(processed),
         "--skip-colmap",
         "--skip-image-processing",
-        "--colmap-model-path", "colmap/sparse/0",
+        "--colmap-model-path", model_arg,
     ])
     timings["process_data_sequential_s"] = round(time.monotonic() - started, 1)
     if regen.returncode != 0 and mp.returncode != 0:
