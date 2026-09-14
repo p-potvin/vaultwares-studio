@@ -341,6 +341,41 @@ def retry_mapper(processed: Path) -> int:
     return count_registered_images(processed)
 
 
+def _largest_sparse_model(processed: Path) -> Path | None:
+    """The COLMAP sparse model with the most registered images.
+
+    images.bin opens with a uint64 count, so this needs 8 bytes per candidate
+    rather than a parse.
+    """
+    import struct
+
+    best, best_count = None, -1
+    for cameras in processed.rglob("cameras.bin"):
+        folder = cameras.parent
+        # COLMAP's dense stage keeps its own copy of the sparse model. Same
+        # content, but picking it makes the chosen path depend on whether dense
+        # ran, so prefer the sparse tree and stay predictable.
+        if "dense" in folder.parts:
+            continue
+        images, points = folder / "images.bin", folder / "points3D.bin"
+        if not (images.exists() and points.exists()):
+            continue
+        try:
+            with open(images, "rb") as handle:
+                count = struct.unpack("<Q", handle.read(8))[0]
+        except (OSError, struct.error):
+            continue
+        if count > best_count:
+            best, best_count = folder, count
+    if best is not None:
+        try:
+            shown = best.relative_to(processed)
+        except ValueError:
+            shown = best
+        print(f"[recon] sparse model {shown}: {best_count} registered images", flush=True)
+    return best
+
+
 def count_registered_images(processed_dir: Path) -> int:
     transforms = processed_dir / "transforms.json"
     if not transforms.exists():
@@ -608,18 +643,17 @@ def finish_export(
             if db_candidate.exists():
                 archive.write(db_candidate, "colmap_database.db")
             # See main() for why we archive sparse/*.bin.
-            sparse_dirs = sorted(
-                {p.parent for p in processed.rglob("cameras.bin")},
-                key=lambda p: p.stat().st_mtime,
-                reverse=True,
-            )
-            final_sparse = next(
-                (
-                    d for d in sparse_dirs
-                    if (d / "images.bin").exists() and (d / "points3D.bin").exists()
-                ),
-                None,
-            )
+            #
+            # Chosen by REGISTERED IMAGE COUNT, not mtime. COLMAP's mapper emits
+            # sparse/0, sparse/1, ... plus a directory per retry, and the newest
+            # by mtime is routinely a small disconnected fragment rather than the
+            # model ns-process-data actually built transforms.json from. The
+            # 14 June backyard bundle shipped a 10-image, 2,325-point fragment
+            # alongside 491 posed frames because of exactly that, which made its
+            # visibility data unusable: COLMAP's gauge is arbitrary per model, so
+            # tracks from one model say nothing about poses from another.
+            # Registered-image count is the same criterion best_model used.
+            final_sparse = _largest_sparse_model(processed)
             if final_sparse is not None:
                 for name in ("cameras.bin", "images.bin", "points3D.bin"):
                     archive.write(final_sparse / name, f"sparse/{name}")
@@ -1080,15 +1114,9 @@ def main() -> int:  # noqa: PLR0911, PLR0915
             db_candidate = processed / "colmap" / "database.db"
             if db_candidate.exists():
                 archive.write(db_candidate, "colmap_database.db")
-            sparse_dirs = sorted(
-                {p.parent for p in processed.rglob("cameras.bin")},
-                key=lambda p: p.stat().st_mtime, reverse=True,
-            )
-            final_sparse = next(
-                (d for d in sparse_dirs
-                 if (d / "images.bin").exists() and (d / "points3D.bin").exists()),
-                None,
-            )
+            # By registered image count, not mtime — see _largest_sparse_model.
+            # This is the copy that actually shipped the 14 June fragment.
+            final_sparse = _largest_sparse_model(processed)
             if final_sparse is not None:
                 for name in ("cameras.bin", "images.bin", "points3D.bin"):
                     archive.write(final_sparse / name, f"sparse/{name}")
