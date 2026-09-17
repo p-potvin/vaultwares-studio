@@ -95,9 +95,11 @@ def run(ctx: "DigitalTwinStudioRunner", stage: "StageRecord") -> None:
         entities.append(path_entity)
 
     mesh = ctx.recon_dir / "mesh.usda"
+    volume = _stage_volume(ctx)
     compose_scene(
         ctx.usd_stage_path, ctx.recon_stage_path, entities,
         capture_frames=capture, mesh=mesh if mesh.exists() else None,
+        volume=volume,
     )
     write_render_path(job_dir, path_entity)
     ctx.manifest.metadata["cameras"] = [entity.to_dict() for entity in entities]
@@ -112,6 +114,7 @@ def run(ctx: "DigitalTwinStudioRunner", stage: "StageRecord") -> None:
         "captureFrames": len(capture),
         "renderPath": path_entity.name,
         "meshReferenced": mesh.exists(),
+        "volumeReferenced": volume is not None,
         "sceneRadius": round(bounds.radius, 4),
     }
     if capture:
@@ -141,8 +144,46 @@ def run(ctx: "DigitalTwinStudioRunner", stage: "StageRecord") -> None:
         )
     if mesh.exists():
         ctx._add_artifact(stage, "Fused Surface", "usd", mesh, "TSDF mesh from the DA3 depth fields.")
+    if volume is not None:
+        ctx._add_artifact(
+            stage, "Volume", "usd", volume,
+            "NanoVDB level set: signed distance in world units, free space included.",
+        )
+        ctx._add_artifact(
+            stage, "Volume Grid", "nvdb", ctx.recon_dir / "volume.nvdb",
+            "The .nvdb itself, for Omniverse and anything that reads NanoVDB.",
+        )
     for index, preview in enumerate(preview_paths[:3], start=1):
         ctx._add_artifact(stage, f"Camera Preview {index}", "image", preview, "Generated camera preview.")
+
+
+def _stage_volume(ctx: "DigitalTwinStudioRunner") -> Path | None:
+    """The USD layer for the level set, authored on demand from volume.nvdb.
+
+    Returns None when there is no grid — a capture with no retained streaming
+    depth simply has no volume, which is not an error. The USD layer is rewritten
+    whenever it is older than the grid so that re-fusing does not leave a stage
+    pointing at a stale asset; the alternative, silently reusing it, is how a
+    twin ends up showing last week's geometry.
+    """
+    nvdb = ctx.recon_dir / "volume.nvdb"
+    if not nvdb.exists():
+        return None
+    usd = ctx.recon_dir / "volume.usda"
+    if usd.exists() and usd.stat().st_mtime >= nvdb.stat().st_mtime:
+        return usd
+    try:
+        from ..nanovdb_read import read
+        from ..volume_asset import volume_to_usd
+
+        grids = read(nvdb)
+        field = grids[0].grid_name if grids else "surface"
+        if usd.exists():
+            usd.unlink()
+        return volume_to_usd(nvdb, usd, field_name=field)
+    except Exception as exc:  # noqa: BLE001 - a bad volume must not fail staging
+        ctx.log(f"Volume layer skipped: {exc}")
+        return None
 
 
 def _source_duration(ctx: "DigitalTwinStudioRunner") -> float | None:

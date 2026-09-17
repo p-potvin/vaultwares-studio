@@ -112,6 +112,69 @@ def grid_from_preview_ply(preview_ply: Path, **kwargs) -> OccupancyGrid:
     return grid_from_points(points, **kwargs)
 
 
+def grid_from_level_set(
+    nvdb_path: Path,
+    *,
+    surface_band: float | None = None,
+    scene_transform: np.ndarray | None = None,
+    **kwargs,
+) -> OccupancyGrid:
+    """Build the grid from a NanoVDB level set instead of the splat preview.
+
+    This *feeds* the existing point-based path rather than replacing it: the
+    voxels near the zero crossing are the surface, and their centres are handed
+    to ``grid_from_points`` unchanged. Everything about floor estimation, the
+    body band and the support threshold stays where it is and keeps working the
+    same way.
+
+    Why that is worth doing at all, given the preview cloud already exists: the
+    splat preview is 200k gaussians subsampled for display, weighted towards
+    whatever the renderer found interesting. The level set is every voxel a
+    depth ray actually crossed, at a known spacing, with a known distance to the
+    surface — so ``surface_band`` selects "within N metres of a real surface"
+    rather than "a point happened to land here".
+
+    ``scene_transform`` must be ``camera_scene.scene_frame_transform(job_dir)``
+    — trainer normalisation then the gravity rotation, the same chain
+    ``depth_fusion`` applies to the mesh. The grid is fused in DA3 world
+    coordinates where "up" is wherever the phone was pointing, and the body band
+    is measured against a floor, so without it the band cuts the scene at an
+    angle. Passing the gravity rotation alone is not enough and lands the floor
+    metres away: the trainer's normalisation carries a scale.
+
+    ``surface_band`` defaults to one voxel, which is the thinnest shell that is
+    still closed. Widening it thickens obstacles; narrowing it below a voxel
+    starts punching holes that the geodesic field will happily route through.
+
+    What this does NOT yet use is the free space. A level set knows the
+    difference between "empty" and "never observed" — positive values inside the
+    band versus voxels that do not exist — and the grid's UNKNOWN cells could be
+    filled from it. That is the next step, not this one.
+    """
+    from ..nanovdb_read import read
+
+    grids = read(nvdb_path)
+    if not grids:
+        raise ValueError(f"{nvdb_path} holds no grids")
+    grid = grids[0]
+    ijk, values = grid.active_voxels()
+    if not len(ijk):
+        raise ValueError(f"{nvdb_path} has no active voxels")
+
+    band = surface_band if surface_band is not None else float(grid.voxel_size[0])
+    near = np.abs(values) <= band
+    if not near.any():
+        raise ValueError(
+            f"no voxel within {band} of the surface; the band is narrower than "
+            f"the voxel size {grid.voxel_size[0]}"
+        )
+    points = grid.index_to_world(ijk[near])
+    if scene_transform is not None:
+        transform = np.asarray(scene_transform, dtype=np.float64)
+        points = points @ transform[:3, :3].T + transform[:3, 3]
+    return grid_from_points(points, **kwargs)
+
+
 def geodesic_field(grid: OccupancyGrid, goal_row: int, goal_col: int) -> np.ndarray:
     """BFS distance (in cells) from every free cell to the goal; inf elsewhere."""
     from collections import deque

@@ -56,6 +56,7 @@ def compose_scene(
     *,
     capture_frames: list | None = None,
     mesh: Path | None = None,
+    volume: Path | None = None,
     annotations: list[dict] | None = None,
 ) -> None:
     """Create a portable USD root with real reconstruction and animated cameras.
@@ -89,6 +90,14 @@ def compose_scene(
             surface = UsdGeom.Xform.Define(stage, "/World/DigitalTwin/Surface")
             surface.GetPrim().GetReferences().AddReference(
                 Path(os.path.relpath(mesh.resolve(), path.parent.resolve())).as_posix()
+            )
+        if volume is not None and volume.exists():
+            # The level set alongside the mesh rather than instead of it: the
+            # mesh is what most viewers draw, the volume is what carries free
+            # space and is what Omniverse consumes.
+            field = UsdGeom.Xform.Define(stage, "/World/DigitalTwin/Volume")
+            field.GetPrim().GetReferences().AddReference(
+                Path(os.path.relpath(volume.resolve(), path.parent.resolve())).as_posix()
             )
         for index, entity in enumerate(cameras):
             author_usd_camera(stage, f"/World/Navigation/Camera_{index + 1}", entity)
