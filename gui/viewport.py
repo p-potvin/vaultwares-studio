@@ -286,8 +286,12 @@ class ViewportPanel(QFrame):
             value if (value := base_translate(key)) != key else _DEFAULT_STRINGS.get(key, key)
         )
         self._job_dir: Path | None = None
+        # A .ply/.splat dropped onto the viewport, shown without a job around
+        # it. Set by load_file, cleared by set_job; reload_scene honours it.
+        self._loose_file: Path | None = None
         # (path_key, SceneBounds) — see _get_bounds_cached.
         self._bounds_cache: tuple | None = None
+        self.setAcceptDrops(True)
 
         layout = QVBoxLayout(self)
         layout.setContentsMargins(10, 10, 10, 10)
@@ -440,6 +444,9 @@ class ViewportPanel(QFrame):
         settings.setAttribute(QWebEngineSettings.WebAttribute.SpatialNavigationEnabled, True)
 
         self._server = ViewerServer()
+        # The page would otherwise take the drop itself (Chromium accepts
+        # file drags) and the panel never sees it.
+        self.web_view.setAcceptDrops(False)
 
         self._bridge = ViewportBridge(self)
         self._channel = QWebChannel(self)
@@ -457,9 +464,86 @@ class ViewportPanel(QFrame):
 
     # -- public API ------------------------------------------------------------
 
+    DROPPABLE = {".ply", ".splat", ".ksplat"}
+
+    @classmethod
+    def droppable_path(cls, mime_data) -> Path | None:
+        """The first local file in a drag payload the viewport can show."""
+        if not mime_data.hasUrls():
+            return None
+        for url in mime_data.urls():
+            if url.isLocalFile() and Path(url.toLocalFile()).suffix.lower() in cls.DROPPABLE:
+                return Path(url.toLocalFile())
+        return None
+
+    def dragEnterEvent(self, event) -> None:  # noqa: N802
+        if self.droppable_path(event.mimeData()) is not None:
+            event.acceptProposedAction()
+        else:
+            event.ignore()
+
+    def dragMoveEvent(self, event) -> None:  # noqa: N802
+        self.dragEnterEvent(event)
+
+    def dropEvent(self, event) -> None:  # noqa: N802
+        path = self.droppable_path(event.mimeData())
+        if path is None:
+            event.ignore()
+            return
+        event.acceptProposedAction()
+        self.load_file(path)
+
+    def load_file(self, path: Path | str) -> None:
+        """Show one .ply or packed .splat that is not part of a job.
+
+        A gaussian PLY or a packed splat loads as is. A plain point cloud
+        (x, y, z, colour — what DA3-Streaming's ``combined_pcd.ply`` is) is
+        packed to a ``.splat`` beside it first, the same conversion the job
+        path applies, so the gaussian viewer can draw it as tiny isotropic
+        points. Camera capture stays off: there is no job to save poses into.
+        """
+        path = Path(path)
+        if not path.is_file() or path.suffix.lower() not in self.DROPPABLE:
+            self._set_status(f"Cannot open {path.name}: expected .ply, .splat or .ksplat")
+            return
+        self._loose_file = path
+        self._bounds_cache = None
+        self.reload_scene()
+
+    def _load_loose(self) -> None:
+        path = self._loose_file
+        assert path is not None
+        scene = path
+        if path.suffix.lower() == ".ply":
+            from vaultwares_studio.splat_io import is_gaussian_ply, read_point_cloud_as_splat
+            from vaultwares_studio.splat_packed import write_splat_format
+            if not is_gaussian_ply(path):
+                packed = path.with_suffix(".splat")
+                if not packed.exists() or packed.stat().st_mtime < path.stat().st_mtime:
+                    try:
+                        self._set_status(self._t("viewport_converting_point_cloud"))
+                        write_splat_format(read_point_cloud_as_splat(path), packed)
+                        self.log.emit(f"[viewport] Packed plain point cloud: {packed.name}")
+                    except Exception as exc:  # noqa: BLE001 - fall back to the PLY itself
+                        self.log.emit(f"[viewport] Plain point-cloud conversion skipped: {exc}")
+                if packed.exists():
+                    scene = packed
+        self._server.job_root = scene.parent
+        url = QUrl(self._server.url())
+        query = [f"scene=job/{scene.name}"]
+        frame = self._framing_from_ply(path if path.suffix.lower() == ".ply" else None)
+        if frame:
+            query.append(frame)
+        url.setQuery("&".join(query))
+        self._set_status(self._t("viewport_loading"))
+        self.log.emit(f"[viewport] Loaded file: {path}")
+        self.capture_btn.setEnabled(False)
+        self.web_view.load(url)
+
     def set_job(self, job_dir: Path | str) -> None:
         """Point the viewport at a job; loads its reconstruction if present."""
         self._job_dir = Path(job_dir)
+        self._loose_file = None
         # Invalidate the bounds cache so a new job re-reads its preview PLY.
         # The cache itself is keyed on (path, mtime) so this is belt-and-braces.
         self._bounds_cache = None
@@ -624,7 +708,12 @@ class ViewportPanel(QFrame):
         return prepare_retrace_transforms(self._job_dir)
 
     def reload_scene(self) -> None:
-        if self.web_view is None or self._job_dir is None:
+        if self.web_view is None:
+            return
+        if self._loose_file is not None:
+            self._load_loose()
+            return
+        if self._job_dir is None:
             return
         # Prefer the packed .splat (~7x smaller than the PLY and the viewer
         # skips PLY header parsing). Fall back to cloud.ply for legacy jobs
@@ -691,6 +780,10 @@ class ViewportPanel(QFrame):
     def _scene_framing(self) -> str:
         """Centroid + radius from the preview cloud so the camera starts framed."""
         preview = self._job_dir / "reconstruction" / "cloud_preview.ply" if self._job_dir else None
+        return self._framing_from_ply(preview)
+
+    @staticmethod
+    def _framing_from_ply(preview: Path | None) -> str:
         if preview is None or not preview.exists():
             return ""
         try:

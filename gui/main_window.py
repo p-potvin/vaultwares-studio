@@ -45,6 +45,30 @@ class MainWindow(QMainWindow):
 
         self.setup_ui()
         self.apply_themes()
+        # A .ply or .splat dropped anywhere on the window opens in the
+        # viewport, job or no job. The console's raw artifacts are not in the
+        # job layout, and opening one should not require making them so.
+        self.setAcceptDrops(True)
+
+    def dragEnterEvent(self, event) -> None:  # noqa: N802
+        if self.viewport_panel.droppable_path(event.mimeData()) is not None:
+            event.acceptProposedAction()
+        else:
+            event.ignore()
+
+    def dragMoveEvent(self, event) -> None:  # noqa: N802
+        self.dragEnterEvent(event)
+
+    def dropEvent(self, event) -> None:  # noqa: N802
+        path = self.viewport_panel.droppable_path(event.mimeData())
+        if path is None:
+            event.ignore()
+            return
+        event.acceptProposedAction()
+        self.pipeline_workspace.append_log(f"Opening dropped file: {path}")
+        self.viewport_panel.load_file(path)
+        self.content_stack.setCurrentWidget(self.viewport_panel)
+        self.btn_open_viewport.setText("BACK TO PIPELINE")
 
     def setup_ui(self):
         central_widget = QWidget(self)
