@@ -51,11 +51,12 @@ class _FakeHub:
         self.cancelled: list[str] = []
         self._flavor_by_job: dict[str, str] = {}
 
-    def run_job(self, *, image, command, env, secrets, flavor, timeout, token):
+    def run_job(self, *, image, command, env, secrets, flavor, timeout, token, ssh=False):
         job_id = f"job-{len(self.submitted)}"
         self.submitted.append(flavor)
         self._flavor_by_job[job_id] = flavor
         self.last_image = image
+        self.last_ssh = ssh
         return _Job(job_id, flavor)
 
     def inspect_job(self, *, job_id, token):
@@ -198,3 +199,18 @@ def test_cost_denial_happens_before_any_job_is_submitted(tmp_path):
     with pytest.raises(CostDeniedError):
         runner.run(_ctx(tmp_path, ["t4-small", "a10g-small"]))
     assert runner.hub.submitted == []
+
+
+def test_ssh_is_off_unless_asked_for(tmp_path):
+    """An SSH endpoint on a running job is a deliberate choice, not a default."""
+    runner = _FakeRunner(schedulable={"t4-small"})
+    runner.run(_ctx(tmp_path, ["t4-small"]))
+    assert runner.hub.last_ssh is False
+
+
+def test_ssh_is_forwarded_when_requested(tmp_path):
+    """Jobs have no Spaces-style dev mode; ssh=True is the equivalent, and it is
+    the only way to watch a training that Rich will not narrate into a pipe."""
+    runner = _FakeRunner(schedulable={"t4-small"})
+    runner.run(_ctx(tmp_path, ["t4-small"], ssh=True))
+    assert runner.hub.last_ssh is True

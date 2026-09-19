@@ -292,14 +292,19 @@ class HfJobsStageRunner(StageRunner):
         else:
             container_cmd = ["sh", "-lc", _SH_SHIM]
 
-        timeout_seconds = int(ctx.params.get("timeout_seconds", max(900, est_minutes * 60 * 2)))
+        # An explicit None means no remote limit at all. COLMAP's cost is
+        # superlinear in image count, so a cap sized from an estimate is a
+        # guess, and when it fires the container dies with nothing uploaded.
+        raw_timeout = ctx.params.get("timeout_seconds", max(900, est_minutes * 60 * 2))
+        timeout_seconds = None if raw_timeout is None else int(raw_timeout)
         poll = max(MIN_POLL_INTERVAL_SECONDS, float(self.config.poll_interval_seconds))
         scheduling_timeout = float(ctx.params.get("flavor_scheduling_timeout_seconds", 120.0))
 
         job = None
         flavor = None
         for candidate in flavor_candidates:
-            ctx.log(f"[hf-jobs] launching job: image={image} flavor={candidate} timeout={timeout_seconds}s")
+            ctx.log(f"[hf-jobs] launching job: image={image} flavor={candidate} "
+                    f"timeout={'none' if timeout_seconds is None else str(timeout_seconds) + 's'}")
             candidate_job = hub.run_job(
                 image=image,
                 command=container_cmd,
@@ -310,6 +315,11 @@ class HfJobsStageRunner(StageRunner):
                 secrets={"HF_TOKEN": token},
                 flavor=candidate,
                 timeout=timeout_seconds,
+                # Opens an SSH endpoint on the running container. Jobs have no
+                # "dev mode" the way Spaces do; this is the equivalent, and it
+                # is the only way to watch a training that Rich refuses to
+                # narrate into a pipe.
+                ssh=bool(ctx.params.get("ssh", False)),
                 token=token,
             )
             ctx.log(f"[hf-jobs] job started: {candidate_job.url}")
@@ -365,6 +375,7 @@ class HfJobsStageRunner(StageRunner):
         log_thread.start()
 
         last_stage = ""
+        announced_ssh = False
         while True:
             if ctx.cancel.cancelled:
                 ctx.log("[hf-jobs] cancelling remote job…")
@@ -372,6 +383,10 @@ class HfJobsStageRunner(StageRunner):
                 raise StageCancelledError(f"Remote job {job.id} cancelled.")
             info = hub.inspect_job(job_id=job.id, token=token)
             stage_name = info.status.stage
+            ssh_url = getattr(info.status, "ssh_url", None)
+            if ssh_url and not announced_ssh:
+                ctx.log(f"[hf-jobs] ssh: {ssh_url}")
+                announced_ssh = True
             if stage_name != last_stage:
                 ctx.log(f"[hf-jobs] status: {stage_name}")
                 ctx.progress(-1.0, f"Remote job {stage_name.lower()}")
