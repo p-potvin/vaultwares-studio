@@ -155,3 +155,17 @@ def test_pixel_stride_barely_changes_the_voxel_set():
     dense = integrate([plane_frame(1.0)], voxel_size=0.05, pixel_stride=1)
     sparse = integrate([plane_frame(1.0)], voxel_size=0.05, pixel_stride=2)
     assert sparse.active > 0.8 * dense.active
+
+
+def test_packing_an_empty_frame_is_not_an_error():
+    """A depth map entirely outside the volume contributes no voxels.
+
+    That is ordinary — a frame can look away from the scene — but ``min()`` on
+    an empty array has no identity, so the range check raised rather than
+    returning nothing.
+    """
+    empty = pack_keys(np.zeros((0, 3), dtype=np.int32))
+    assert empty.shape == (0,)
+    assert empty.dtype == np.int64
+    # The other direction always worked; keep it pinned so the pair stays symmetric.
+    assert unpack_keys(empty).shape == (0, 3)

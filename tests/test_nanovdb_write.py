@@ -175,3 +175,16 @@ def test_grid_size_in_the_header_matches_the_bytes_written(tmp_path):
     expected = 16 + 176 + len("density") + report.grid_bytes
     assert path.stat().st_size == expected
     read(path)  # the reader cross-checks mGridSize against the metadata
+
+
+def test_coordinates_beyond_21_bits_are_refused(tmp_path):
+    """The writer packs 21 bits per axis, and out of range the shifts collide.
+
+    A colliding key makes two distinct voxels look like duplicates, so the
+    duplicate check would fire on coordinates that are fine — or, worse, pass
+    while the masks and the values disagree.
+    """
+    ijk = np.array([[0, 0, 0], [1 << 21, 0, 0]], dtype=np.int64)
+    values = np.zeros(len(ijk), dtype=np.float32)
+    with pytest.raises(ValueError, match="21-bit packing range"):
+        write_float_grid(tmp_path / "out.nvdb", ijk, values, voxel_size=0.1)

@@ -48,6 +48,11 @@ def build_order(files: list[Path], split: int, a: int, b: int, keep_a: int, keep
     """``split``, ``a``, ``b`` are 1-based candidate numbers as the files are named."""
     clip_a, clip_b = files[:split - 1], files[split - 1:]
     a_local, b_local = a - 1, b - split
+    # a_local is bounded below exclusively and b_local inclusively, on purpose.
+    # A seam at A's first frame leaves A contributing a single frame ahead of
+    # the cut, which is not a splice of two clips — it is clip B with a stray
+    # frame in front. B has no such degenerate case: b_local == 0 means the cut
+    # lands on B's first frame, and all of B still follows it.
     if not (0 < a_local < len(clip_a)) or not (0 <= b_local < len(clip_b)):
         raise SystemExit(f"seam outside the clips: a={a} of {len(clip_a)}, b={b} of {len(clip_b)} (split {split})")
     # Thin each clip evenly to its budget first, then cut; the seam frames

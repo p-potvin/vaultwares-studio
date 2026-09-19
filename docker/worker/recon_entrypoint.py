@@ -112,7 +112,8 @@ def start_resource_heartbeat(interval: float = 60.0) -> None:
             time.sleep(interval)
             load = ""
             try:
-                load = f" | load {open('/proc/loadavg').read().split()[0]}"
+                with open('/proc/loadavg') as handle:
+                    load = f" | load {handle.read().split()[0]}"
             except Exception:  # noqa: BLE001
                 pass
             print(f"[heartbeat] {(time.monotonic()-started)/60:.0f} min | "

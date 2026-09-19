@@ -244,3 +244,22 @@ def test_expectations_are_checked(simple_file: Path):
         verify(simple_file, expect={"voxel_count": 4})
     with pytest.raises(NanoVDBError, match="voxel size"):
         verify(simple_file, expect={"voxel_size": (0.25, 0.25, 0.25)})
+
+
+def test_a_grid_buffer_shorter_than_griddata_is_rejected():
+    """file_size comes out of the file, so it can point at far too few bytes.
+
+    Every offset _parse_grid reads is a fixed position inside GridData, and the
+    tree read starts at GRID_DATA_SIZE itself, so a truncated header used to
+    surface as struct.error from whichever unpack happened to go first.
+    """
+    from vaultwares_studio.nanovdb_read import FileMeta, _parse_grid
+
+    meta = FileMeta(
+        grid_size=GRID_DATA_SIZE, file_size=16, name_key=0, voxel_count=0,
+        grid_type=1, grid_class=1, world_bbox=(0.0,) * 6, index_bbox=(0,) * 6,
+        voxel_size=(1.0, 1.0, 1.0), name="density", node_count=(0, 0, 0, 1),
+        tile_count=(0, 0, 0), codec=0, version=(32, 7, 0),
+    )
+    with pytest.raises(NanoVDBError, match="shorter than GridData"):
+        _parse_grid(meta, b"\x00" * (GRID_DATA_SIZE - 1))

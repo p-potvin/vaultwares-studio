@@ -128,3 +128,25 @@ def test_visible_counts_are_what_the_alignment_budget_assumes(model_dir: Path):
     model = read_sparse_model(model_dir)
     counts = np.array([len(v) for v in model.visible.values()])
     assert counts.max() <= len(model.xyz)
+
+
+def test_a_non_utf8_filename_round_trips_rather_than_aborting(tmp_path: Path):
+    """COLMAP stores the filename as raw bytes, and not every filesystem is UTF-8.
+
+    A strict decode aborts the whole read over one name. "replace" would not,
+    but it substitutes a character, and these names are used to open files --
+    a replaced byte is a name that silently matches nothing. surrogateescape
+    keeps the bytes recoverable.
+    """
+    raw = b"frame_\xff\xfe.jpg"
+    path = tmp_path / "images.bin"
+    with open(path, "wb") as stream:
+        stream.write(struct.pack("<Q", 1))
+        stream.write(struct.pack("<i", 7))
+        stream.write(struct.pack("<7d", 1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0))
+        stream.write(struct.pack("<i", 1))
+        stream.write(raw + b"\x00")
+        stream.write(struct.pack("<Q", 0))
+
+    names = read_image_names(path)
+    assert names[7].encode("utf-8", errors="surrogateescape") == raw

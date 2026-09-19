@@ -241,6 +241,16 @@ def read(path: Path | str) -> list[Grid]:
 
 
 def _parse_grid(meta: FileMeta, buffer: bytes) -> Grid:
+    # Every offset below is a fixed position inside GridData, and the tree read
+    # at the end starts at GRID_DATA_SIZE itself. meta.file_size came out of the
+    # file, so a truncated or hostile header can point here with far less than
+    # that, and struct.unpack_from would raise struct.error from six different
+    # places. Say what is wrong once, in terms of the grid.
+    if len(buffer) < GRID_DATA_SIZE:
+        raise NanoVDBError(
+            f"grid '{meta.name}': {len(buffer)} bytes is shorter than GridData's "
+            f"{GRID_DATA_SIZE}"
+        )
     grid_magic = struct.unpack_from("<Q", buffer, 0)[0]
     if grid_magic not in (MAGIC_NUMB, MAGIC_GRID):
         raise NanoVDBError(

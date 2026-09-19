@@ -54,6 +54,12 @@ PACK_BIAS = 1 << 20
 
 
 def pack_keys(ijk: np.ndarray) -> np.ndarray:
+    # A frame whose depth map is entirely outside the volume contributes no
+    # voxels, which is ordinary rather than exceptional — but min() on an empty
+    # array has no identity and raises. unpack_keys already handles the empty
+    # case correctly, so this is the only side that needed it.
+    if len(ijk) == 0:
+        return np.zeros(0, dtype=np.int64)
     k = np.asarray(ijk, dtype=np.int64) + PACK_BIAS
     if k.min() < 0 or k.max() >= (1 << PACK_BITS):
         raise ValueError(

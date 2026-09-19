@@ -58,11 +58,18 @@ def verify(path_a: Path, path_b: Path, sift, matcher, width: int = 960) -> int:
     import cv2
 
     def load(p: Path):
+        # imread reports an unreadable or truncated file by returning None
+        # rather than raising, and a candidate directory of 2000 extracted
+        # frames is exactly where one short write goes unnoticed.
         image = cv2.imread(str(p), cv2.IMREAD_GRAYSCALE)
+        if image is None:
+            return None
         scale = width / image.shape[1]
         return cv2.resize(image, None, fx=scale, fy=scale, interpolation=cv2.INTER_AREA)
 
     a, b = load(path_a), load(path_b)
+    if a is None or b is None:
+        return 0
     ka, da = sift.detectAndCompute(a, None)
     kb, db = sift.detectAndCompute(b, None)
     if da is None or db is None or len(ka) < 8 or len(kb) < 8:

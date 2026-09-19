@@ -157,6 +157,15 @@ def write_float_grid(
     # so the file would claim fewer voxels than it stores. Last one wins, but
     # say so rather than silently disagreeing with the caller's count.
     packed_all = (ijk.astype(np.int64) + (1 << 20))
+    # 21 bits per axis, same packing as tsdf_volume.pack_keys, which has always
+    # checked this and this has not. Out of range, the shifts collide instead of
+    # overflowing, so the duplicate check below would pass on coordinates that
+    # are not actually distinct and the masks would disagree with the values.
+    if packed_all.min() < 0 or packed_all.max() >= (1 << 21):
+        raise ValueError(
+            "voxel index outside the 21-bit packing range; coordinates must be "
+            f"within [{-(1 << 20)}, {(1 << 20) - 1}]"
+        )
     flat = (packed_all[:, 0] << 42) | (packed_all[:, 1] << 21) | packed_all[:, 2]
     unique_flat, first = np.unique(flat, return_index=True)
     if len(unique_flat) != len(ijk):

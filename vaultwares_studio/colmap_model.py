@@ -114,7 +114,11 @@ def read_image_names(path: Path) -> dict[int, str]:
             (num_points2d,) = _read(stream, "<Q")
             # Each observation is (double x, double y, uint64 point3D_id).
             stream.seek(24 * num_points2d, 1)
-            names[int(image_id)] = name.decode("utf-8")
+            # surrogateescape rather than strict: a non-UTF-8 filename must
+            # not abort the read. Not "replace" either — these names are used
+            # to open files, and a replaced byte is a name that silently
+            # matches nothing. surrogateescape round-trips the exact bytes.
+            names[int(image_id)] = name.decode("utf-8", errors="surrogateescape")
     return names
 
 
