@@ -77,6 +77,101 @@ def vocab_tree_augment_and_remap(processed: Path, vocab_tree: Path) -> int:
     return retry_mapper(processed)
 
 
+def start_resource_heartbeat(interval: float = 60.0) -> None:
+    """Log elapsed time, memory and CPU every minute, in a daemon thread.
+
+    COLMAP prints plenty, but none of it says how close the container is to its
+    memory limit, and that is the number that decides whether the thread count
+    was too ambitious. A training run was OOMKilled on 17 Sep after 271 silent
+    minutes; this is the same instrument, on the SfM side.
+    """
+    import threading
+
+    started = time.monotonic()
+
+    def read_memory() -> str:
+        out = []
+        try:
+            used = int(Path("/sys/fs/cgroup/memory.current").read_text().strip())
+            raw = Path("/sys/fs/cgroup/memory.max").read_text().strip()
+            cap = None if raw == "max" else int(raw)
+            out.append(f"cgroup {used/1e9:.1f}/{cap/1e9:.1f} GB ({used/cap:.0%})"
+                       if cap else f"cgroup {used/1e9:.1f} GB")
+        except Exception:  # noqa: BLE001
+            pass
+        try:
+            info = dict((l.split(":")[0], int(l.split()[1]))
+                        for l in Path("/proc/meminfo").read_text().splitlines() if ":" in l)
+            out.append(f"avail {info['MemAvailable']/1e6:.1f} GB")
+        except Exception:  # noqa: BLE001
+            pass
+        return " | ".join(out) or "memory unavailable"
+
+    def tick() -> None:
+        while True:
+            time.sleep(interval)
+            load = ""
+            try:
+                load = f" | load {open('/proc/loadavg').read().split()[0]}"
+            except Exception:  # noqa: BLE001
+                pass
+            print(f"[heartbeat] {(time.monotonic()-started)/60:.0f} min | "
+                  f"{read_memory()}{load} | cpus {os.cpu_count()}", flush=True)
+
+    threading.Thread(target=tick, daemon=True).start()
+
+
+def colmap_camera_params(calibration_path, images_dir) -> str:
+    """``fx,fy,cx,cy,k1,k2,p1,p2`` for COLMAP's OPENCV model, or "" if unknown.
+
+    Scaled to the images COLMAP will actually read, because a calibration only
+    means anything at the resolution it was measured at.
+    """
+    if not calibration_path:
+        return ""
+    try:
+        calibration = json.loads(Path(calibration_path).read_text(encoding="utf-8"))
+        width, height = int(calibration["w"]), int(calibration["h"])
+    except Exception as exc:  # noqa: BLE001 - a bad file must not stop the run
+        print(f"[recon] calibration unreadable ({exc}); continuing without it", flush=True)
+        return ""
+
+    actual = None
+    for image in sorted(images_dir.iterdir()):
+        if image.suffix.lower() in (".jpg", ".jpeg", ".png"):
+            try:
+                from PIL import Image
+
+                with Image.open(image) as handle:
+                    actual = handle.size
+            except Exception:  # noqa: BLE001
+                actual = None
+            break
+
+    scale_x = scale_y = 1.0
+    if actual and actual[0] and actual[1]:
+        if abs(actual[0] / actual[1] - width / height) > 0.01:
+            print(f"[recon] calibration is {width}x{height} but images are "
+                  f"{actual[0]}x{actual[1]}; aspect differs, not scaling", flush=True)
+            return ""
+        scale_x, scale_y = actual[0] / width, actual[1] / height
+
+    focal_x = float(calibration.get("fl_x", 0.0)) * scale_x
+    if focal_x <= 0:
+        return ""
+    values = [
+        focal_x,
+        float(calibration.get("fl_y", calibration.get("fl_x", 0.0))) * scale_y,
+        float(calibration.get("cx", width / 2)) * scale_x,
+        float(calibration.get("cy", height / 2)) * scale_y,
+        float(calibration.get("k1", 0.0)),
+        float(calibration.get("k2", 0.0)),
+        float(calibration.get("p1", 0.0)),
+        float(calibration.get("p2", 0.0)),
+    ]
+    return ",".join(f"{v:.6f}" for v in values)
+
+
 def ensure_vocab_tree() -> Path | None:
     """Download the pretrained vocab tree if it isn't already on disk."""
     if VOCAB_TREE_PATH.exists() and VOCAB_TREE_PATH.stat().st_size > 1_000_000:
@@ -704,6 +799,34 @@ def main() -> int:  # noqa: PLR0911, PLR0915
         help="SiftExtraction.max_image_size (lower = faster extract + fewer keypoints).",
     )
     parser.add_argument(
+        "--sift-num-threads",
+        type=int,
+        default=4,
+        help="SiftExtraction.num_threads. -1 uses every core; the default 4 was "
+             "sized for uncapped features and is over-conservative once "
+             "--sift-max-num-features is set.",
+    )
+    parser.add_argument(
+        "--match-num-threads",
+        type=int,
+        default=8,
+        help="SiftMatching.num_threads. -1 uses every core.",
+    )
+    parser.add_argument(
+        "--sift-max-num-features",
+        type=int,
+        default=4096,
+        help="SiftExtraction.max_num_features. 0 keeps COLMAP's default, which "
+             "produced a median of 11,486 keypoints per image and matched poorly.",
+    )
+    parser.add_argument(
+        "--calibration",
+        default=None,
+        help="Lens calibration JSON (fl_x/fl_y/cx/cy/w/h and optional k1,k2,p1,p2). "
+             "Passed to COLMAP as ImageReader.camera_params; without it COLMAP "
+             "guesses the focal and every pair verifies as UNCALIBRATED.",
+    )
+    parser.add_argument(
         "--refine-mode",
         action="store_true",
         help=(
@@ -731,6 +854,7 @@ def main() -> int:  # noqa: PLR0911, PLR0915
         ),
     )
     args = parser.parse_args()
+    start_resource_heartbeat()
 
     in_dir = Path(os.environ["VW_IN"])
     out_dir = Path(os.environ["VW_OUT"])
@@ -955,16 +1079,57 @@ def main() -> int:  # noqa: PLR0911, PLR0915
     db_path = colmap_dir / "database.db"
 
     # 1. Feature extraction (capped threads + capped image size).
-    fe = run([
+    #
+    # camera_params is the difference between a calibrated and an uncalibrated
+    # reconstruction, and omitting it is not a neutral default. Without it
+    # COLMAP invents focal = 1.2 x max_dimension (2304 px on 1920-wide frames,
+    # against ~890 measured for this phone) and sets prior_focal_length = 0. It
+    # then verifies pairs through the fundamental matrix instead of the
+    # essential matrix, because it does not trust the intrinsics.
+    #
+    # Measured on the 14 Sep cpu-upgrade run, which passed no params:
+    #
+    #   config 3 UNCALIBRATED  82.3%   config 2 CALIBRATED   0.0%
+    #   median matches/pair       36   verified pairs        46%
+    #
+    # The same scene run locally WITH params (fx 948, prior_focal 1):
+    #
+    #   config 2 CALIBRATED    85.1%   median matches/pair    754
+    #                                  verified pairs         83%
+    #
+    # Twenty times the matches per pair, and the calibrated path available at
+    # all. So pass the params whenever a calibration is known.
+    extractor = [
         "colmap", "feature_extractor",
         "--database_path", str(db_path),
         "--image_path", str(images_dir),
         "--ImageReader.single_camera", "1",
         "--ImageReader.camera_model", "OPENCV",
         "--SiftExtraction.use_gpu", "0",
-        "--SiftExtraction.num_threads", "4",
+        # -1 lets COLMAP use every core. The old hard 4 was sized against an
+        # UNCAPPED feature count (median 11,486/image) where 8 threads on a
+        # full-resolution pyramid peaked near 28 GB of cpu-upgrade's 32. With
+        # max_num_features capped the per-thread footprint is far smaller, and
+        # cpu-upgrade has 64 vCPU sitting idle. The heartbeat below is what
+        # makes raising it safe to try.
+        "--SiftExtraction.num_threads", str(args.sift_num_threads),
         "--SiftExtraction.max_image_size", str(args.sift_max_image_size),
-    ])
+    ]
+    if args.sift_max_num_features:
+        # That same run produced a median of 11,486 keypoints per image on
+        # COLMAP's default cap. More keypoints is not more signal: it slows
+        # matching and fills the descriptor space with low-contrast detections.
+        # The local run capped at 4096, landed at a median of 4,939, and
+        # matched far better.
+        extractor += ["--SiftExtraction.max_num_features", str(args.sift_max_num_features)]
+    camera_params = colmap_camera_params(args.calibration, images_dir)
+    if camera_params:
+        extractor += ["--ImageReader.camera_params", camera_params]
+        print(f"[recon] COLMAP camera_params: {camera_params}", flush=True)
+    else:
+        print("[recon] WARNING: no camera_params — COLMAP will guess the focal "
+              "length and verify pairs as UNCALIBRATED", flush=True)
+    fe = run(extractor)
     if fe.returncode != 0:
         return fail(out_dir, "process_data_failed", f"feature_extractor exit {fe.returncode}")
     # Archive db immediately so a downstream failure still ships diagnostics.
@@ -979,7 +1144,7 @@ def main() -> int:  # noqa: PLR0911, PLR0915
         "colmap", "sequential_matcher",
         "--database_path", str(db_path),
         "--SiftMatching.use_gpu", "0",
-        "--SiftMatching.num_threads", "8",
+        "--SiftMatching.num_threads", str(args.match_num_threads),
     ])
     if sm.returncode != 0:
         return fail(out_dir, "process_data_failed", f"sequential_matcher exit {sm.returncode}")

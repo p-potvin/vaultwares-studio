@@ -10,5 +10,5 @@
   "p1": -0.0001947506346839917,
   "p2": -0.00043094833951948854,
   "camera_model": "OPENCV",
-  "source": "COLMAP sequential, local-run-20260614-234541, backyard_134s_sunny.mp4, 491/500 registered"
+  "source": "COLMAP sequential, local-run-20260614-234541, backyard_134s_sunny.mp4, 491/500 registered. LENS: iPhone 11 video at 0.5x (ultra-wide), NOT the device default. Horizontal FOV 94.5 deg at 1920x1080. Do not reuse for footage shot at 1x: the main camera is far narrower. Cross-checked 19 Sep against three independent DA3 estimates from separate captures (881.9 / 906.1 / 902.7 px, 93.3-94.9 deg), so the same lens and zoom was used throughout."
 }

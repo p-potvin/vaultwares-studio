@@ -23,6 +23,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import shutil
 import sys
 import zipfile
 from pathlib import Path
@@ -45,7 +46,7 @@ from vaultwares_studio.runners import (  # noqa: E402
 )
 
 
-def package_worker(staging: Path) -> Path:
+def package_worker(staging: Path, calibration: Path | None = None) -> Path:
     """The worker overlay: today's entrypoint, run by an image built in July.
 
     The deployed vw-studio-da3 image predates the depth bundle entirely — a run
@@ -61,6 +62,8 @@ def package_worker(staging: Path) -> Path:
         worker.write(ROOT / "docker/worker/recon_entrypoint.py", "recon_entrypoint.py")
         worker.write(ROOT / "vaultwares_studio/streaming_convert.py", "streaming_convert.py")
         worker.write(ROOT / "vaultwares_studio/camera_calibration.py", "camera_calibration.py")
+        if calibration and Path(calibration).is_file():
+            worker.write(calibration, "calibration.json")
     return target
 
 
@@ -77,6 +80,17 @@ def main() -> int:
                              "trying the next. The runner's 120s default is optimistic — "
                              "l4x1 has been measured at 20+ min in SCHEDULING, and a "
                              "cancelled job costs nothing, so patience is free.")
+    parser.add_argument("--calibration", type=Path,
+                        default=ROOT / "config" / "calibrations" / "iphone-1920x1080.json",
+                        help="Lens calibration JSON passed to COLMAP as camera_params. "
+                             "Pass an empty string to deliberately run uncalibrated.")
+    parser.add_argument("--sift-num-threads", type=int, default=-1,
+                        help="-1 uses every core (cpu-upgrade has 64).")
+    parser.add_argument("--match-num-threads", type=int, default=-1)
+    parser.add_argument("--sift-max-num-features", type=int, default=4096)
+    parser.add_argument("--no-timeout", action="store_true",
+                        help="Submit with no remote time limit at all. COLMAP's cost is "
+                             "superlinear in image count and a cap that fires uploads nothing.")
     parser.add_argument("--yes", action="store_true", help="approve the job cost")
     args = parser.parse_args()
 
@@ -104,7 +118,7 @@ def main() -> int:
         image = image.format(owner=owner)
 
     job_dir = args.job
-    worker_zip = package_worker(job_dir / "staging")
+    worker_zip = package_worker(job_dir / "staging", args.calibration or None)
     # Unpack the overlay over /opt/vw, then exec the entrypoint from there.
     bootstrap = (
         "import os,sys,zipfile; "
@@ -115,7 +129,17 @@ def main() -> int:
         "--sfm-only",
         "--downscale", "1",
         "--keep-checkpoint",
+        "--sift-num-threads", str(args.sift_num_threads),
+        "--match-num-threads", str(args.match_num_threads),
+        "--sift-max-num-features", str(args.sift_max_num_features),
     ]
+    if args.calibration:
+        # Rides inside worker.zip, which the bootstrap extracts to /opt/vw, so
+        # there is no second input to stage and no path to guess. Without it
+        # COLMAP guesses the focal and verifies every pair as UNCALIBRATED —
+        # measured at 0% calibrated pairs and 36 median matches per pair on the
+        # 14 Sep run, against 85% and 754 with the params supplied.
+        entry += ["--calibration", "/opt/vw/calibration.json"]
     command = ["python", "-c", bootstrap, *entry]
     (job_dir / "reconstruction" / "remote_out").mkdir(parents=True, exist_ok=True)
     remote_out = job_dir / "reconstruction" / "remote_out"
@@ -141,7 +165,7 @@ def main() -> int:
             "image_has_hub": True,
             "flavor": args.flavor or ["cpu-upgrade"],
             "est_minutes": preset.sfm_est_minutes,
-            "timeout_seconds": preset.sfm_timeout_seconds or 3600,
+            "timeout_seconds": None if args.no_timeout else (preset.sfm_timeout_seconds or 3600),
             "command": command,
             "extra_repo_inputs": [],
             "flavor_scheduling_timeout_seconds": args.scheduling_timeout,
