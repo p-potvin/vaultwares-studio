@@ -88,6 +88,16 @@ def main() -> int:
                         help="-1 uses every core (cpu-upgrade has 64).")
     parser.add_argument("--match-num-threads", type=int, default=-1)
     parser.add_argument("--sift-max-num-features", type=int, default=4096)
+    parser.add_argument("--ba-global-max-refinements", type=int, default=2,
+                        help="COLMAP's 5 re-solves the whole global BA up to five "
+                             "times per trigger. The biggest lever on mapper time.")
+    parser.add_argument("--ba-global-ratio", type=float, default=1.3,
+                        help="Model growth that triggers a global BA (COLMAP: 1.1).")
+    parser.add_argument("--ba-global-max-num-iterations", type=int, default=30)
+    parser.add_argument("--ba-global-function-tolerance", type=float, default=1e-6,
+                        help="COLMAP's 0 disables Ceres' converged-early exit.")
+    parser.add_argument("--ba-use-gpu", action="store_true",
+                        help="cpu-upgrade has no GPU; only useful on a GPU flavor.")
     parser.add_argument("--no-timeout", action="store_true",
                         help="Submit with no remote time limit at all. COLMAP's cost is "
                              "superlinear in image count and a cap that fires uploads nothing.")
@@ -132,7 +142,15 @@ def main() -> int:
         "--sift-num-threads", str(args.sift_num_threads),
         "--match-num-threads", str(args.match_num_threads),
         "--sift-max-num-features", str(args.sift_max_num_features),
+        # Bundle adjustment, not matching, is what makes a thousand-image mapper
+        # run take hours. See mapper_ba_options in the entrypoint.
+        "--ba-global-max-refinements", str(args.ba_global_max_refinements),
+        "--ba-global-ratio", str(args.ba_global_ratio),
+        "--ba-global-max-num-iterations", str(args.ba_global_max_num_iterations),
+        "--ba-global-function-tolerance", str(args.ba_global_function_tolerance),
     ]
+    if args.ba_use_gpu:
+        entry.append("--ba-use-gpu")
     if args.calibration:
         # Rides inside worker.zip, which the bootstrap extracts to /opt/vw, so
         # there is no second input to stage and no path to guess. Without it

@@ -191,6 +191,92 @@ def run(cmd: list[str], **kwargs) -> subprocess.CompletedProcess:
     return subprocess.run(cmd, check=False, **kwargs)
 
 
+# Bundle adjustment is where a large mapper run spends its time, and COLMAP's
+# defaults are tuned for tens of images rather than thousands.
+#
+# Two things compound. Global BA fires whenever the model has grown by
+# ``ba_global_*_ratio`` since the last one — 1.1, so every 10%, which over a
+# 1100-image reconstruction is roughly twenty-five triggers, each on a larger
+# problem than the last. And every trigger is not one solve: COLMAP re-runs the
+# whole global BA up to ``ba_global_max_refinements`` times (default 5) while
+# the change exceeds ``ba_global_max_refinement_change``. Two half-hour bundle
+# adjustments back to back are that refinement loop, not two triggers.
+#
+# On top of that ``ba_global_function_tolerance`` defaults to 0, which disables
+# Ceres' "the objective stopped improving" exit, so each solve grinds out all
+# ``ba_global_max_num_iterations`` (50) whether or not it converged early.
+#
+# This is a real trade: fewer refinements and a looser tolerance mean the
+# global solution is less thoroughly converged, and residual drift is a live
+# question on these captures. The defaults below are chosen to cut the
+# repeated work, not the first solve.
+BA_DEFAULTS = {
+    "max_refinements": 2,        # from 5 — the multiplier on every trigger
+    "global_ratio": 1.3,         # from 1.1 — how often a trigger happens
+    "global_freq": 500,          # COLMAP's default; exposed for symmetry
+    "max_num_iterations": 30,    # from 50
+    "function_tolerance": 1e-6,  # from 0 — let Ceres stop when it plateaus
+    "use_gpu": False,            # cpu-upgrade has no GPU; a local box does
+}
+
+_MAPPER_BA_OPTIONS: list[str] = []
+_MAPPER_HELP: str | None = None
+
+
+def _mapper_help() -> str:
+    """``colmap mapper --help``, probed once and remembered."""
+    global _MAPPER_HELP
+    if _MAPPER_HELP is None:
+        try:
+            probe = subprocess.run(["colmap", "mapper", "--help"], check=False,
+                                   capture_output=True, text=True)
+            _MAPPER_HELP = (probe.stdout or "") + (probe.stderr or "")
+        except Exception:  # noqa: BLE001 - no colmap on PATH is not fatal here
+            _MAPPER_HELP = ""
+    return _MAPPER_HELP
+
+
+def mapper_ba_options(help_text: str | None = None, **overrides) -> list[str]:
+    """``--Mapper.*`` bundle-adjustment flags this COLMAP actually accepts.
+
+    COLMAP 3.12 renamed the global-BA trigger from ``images`` to ``frames``
+    when rigs arrived (``ba_global_images_ratio`` -> ``ba_global_frames_ratio``).
+    The deployed worker image was built in July and the local build is 3.12, so
+    neither name can be assumed. Passing one COLMAP does not know is fatal — it
+    exits on an unrecognised option rather than ignoring it — so the help text
+    decides, and anything absent from it is dropped rather than guessed at.
+    """
+    settings = {**BA_DEFAULTS, **overrides}
+    text = _mapper_help() if help_text is None else help_text
+
+    # (preferred name, older name) — the first one present in help wins.
+    ratio = ("ba_global_frames_ratio", "ba_global_images_ratio")
+    freq = ("ba_global_frames_freq", "ba_global_images_freq")
+
+    def pick(names: tuple[str, ...]) -> str | None:
+        return next((n for n in names if n in text), None)
+
+    wanted: list[tuple[str | None, object]] = [
+        ("ba_global_max_refinements", settings["max_refinements"]),
+        (pick(ratio), settings["global_ratio"]),
+        (pick(freq), settings["global_freq"]),
+        ("ba_global_max_num_iterations", settings["max_num_iterations"]),
+        ("ba_global_function_tolerance", settings["function_tolerance"]),
+    ]
+    if settings["use_gpu"]:
+        wanted.append(("ba_use_gpu", 1))
+
+    options: list[str] = []
+    for name, value in wanted:
+        if not name:
+            continue
+        if text and name not in text:
+            print(f"[recon] mapper does not know --Mapper.{name}; skipping", flush=True)
+            continue
+        options += [f"--Mapper.{name}", str(value)]
+    return options
+
+
 def filter_supported_flags(train_args: list[str]) -> list[str]:
     """Drop --flag value pairs that the installed ns-train doesn't know."""
     help_text = ""
@@ -411,6 +497,10 @@ def retry_mapper(processed: Path) -> int:
             "--image_path", str(image_dir),
             "--output_path", str(out_dir),
             "--Mapper.multiple_models", "0",
+            # The retries matter more than the first pass, not less: this loop
+            # runs the mapper up to four times, and each one pays the same
+            # global BA bill.
+            *_MAPPER_BA_OPTIONS,
             *options,
         ])
         if result.returncode != 0:
@@ -828,6 +918,39 @@ def main() -> int:  # noqa: PLR0911, PLR0915
              "guesses the focal and every pair verifies as UNCALIBRATED.",
     )
     parser.add_argument(
+        "--ba-global-max-refinements",
+        type=int,
+        default=BA_DEFAULTS["max_refinements"],
+        help="Mapper.ba_global_max_refinements. COLMAP's 5 re-solves the entire "
+             "global BA up to five times per trigger; this is the single "
+             "largest lever on mapper wall time.",
+    )
+    parser.add_argument(
+        "--ba-global-ratio",
+        type=float,
+        default=BA_DEFAULTS["global_ratio"],
+        help="Model growth that triggers a global BA. COLMAP's 1.1 fires every "
+             "10%%, which over a thousand images is ~25 increasingly expensive "
+             "triggers.",
+    )
+    parser.add_argument(
+        "--ba-global-max-num-iterations",
+        type=int,
+        default=BA_DEFAULTS["max_num_iterations"],
+    )
+    parser.add_argument(
+        "--ba-global-function-tolerance",
+        type=float,
+        default=BA_DEFAULTS["function_tolerance"],
+        help="COLMAP's 0 disables Ceres' converged-early exit, so every solve "
+             "runs its full iteration budget.",
+    )
+    parser.add_argument(
+        "--ba-use-gpu",
+        action="store_true",
+        help="Mapper.ba_use_gpu. Worth it on a box with a GPU; cpu-upgrade has none.",
+    )
+    parser.add_argument(
         "--refine-mode",
         action="store_true",
         help=(
@@ -856,6 +979,16 @@ def main() -> int:  # noqa: PLR0911, PLR0915
     )
     args = parser.parse_args()
     start_resource_heartbeat()
+
+    global _MAPPER_BA_OPTIONS
+    _MAPPER_BA_OPTIONS = mapper_ba_options(
+        max_refinements=args.ba_global_max_refinements,
+        global_ratio=args.ba_global_ratio,
+        max_num_iterations=args.ba_global_max_num_iterations,
+        function_tolerance=args.ba_global_function_tolerance,
+        use_gpu=args.ba_use_gpu,
+    )
+    print(f"[recon] mapper BA options: {' '.join(_MAPPER_BA_OPTIONS) or 'none'}", flush=True)
 
     in_dir = Path(os.environ["VW_IN"])
     out_dir = Path(os.environ["VW_OUT"])
@@ -1197,6 +1330,7 @@ def main() -> int:  # noqa: PLR0911, PLR0915
         "--database_path", str(db_path),
         "--image_path", str(images_dir),
         "--output_path", str(sparse_root),
+        *_MAPPER_BA_OPTIONS,
     ])
     if mp.returncode != 0:
         # Don't fail yet — retry_mapper below tries init-pair smart picks.
