@@ -44,6 +44,8 @@ def main() -> None:
     parser.add_argument("--output", type=Path, required=True)
     parser.add_argument("--preset", choices=["preview", "high"], default="high")
     parser.add_argument("--loop-closure", action="store_true")
+    parser.add_argument("--frames", type=int, default=500, help="frames the console keeps (console caps at 1200)")
+    parser.add_argument("--loop-similarity", type=float, default=0.85, help="SALAD loop-detection threshold")
     args = parser.parse_args()
     configure_storage()
     source = args.video.resolve(strict=True)
@@ -57,11 +59,11 @@ def main() -> None:
         uploaded = client.post(f"{SPACE_URL}/gradio_api/upload", headers=headers, files={"files": (source.name, stream, "video/quicktime")})
         uploaded.raise_for_status()
         server_path = uploaded.json()[0]
-        request = {"data": [{"video": {"path": server_path, "meta": {"_type": "gradio.FileData"}}, "subtitles": None}, args.preset, args.loop_closure]}
+        request = {"data": [{"video": {"path": server_path, "meta": {"_type": "gradio.FileData"}}, "subtitles": None}, args.preset, args.loop_closure, args.frames, args.loop_similarity]}
         submitted = client.post(f"{SPACE_URL}/gradio_api/call/run", headers={**headers, "Content-Type": "application/json"}, json=request)
         submitted.raise_for_status()
         event_id = submitted.json()["event_id"]
-        (output / "submission.json").write_text(json.dumps({"event_id": event_id, "preset": args.preset, "loop_closure": args.loop_closure, "source": str(source)}, indent=2), encoding="utf-8")
+        (output / "submission.json").write_text(json.dumps({"event_id": event_id, "preset": args.preset, "loop_closure": args.loop_closure, "frames": args.frames, "loop_similarity": args.loop_similarity, "source": str(source)}, indent=2), encoding="utf-8")
         events: list[str] = []; current_event = ""; completed = None
         with client.stream("GET", f"{SPACE_URL}/gradio_api/call/run/{event_id}", headers=headers) as response:
             response.raise_for_status()

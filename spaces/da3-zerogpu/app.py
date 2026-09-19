@@ -16,7 +16,7 @@ from pathlib import Path
 import spaces
 import gradio as gr
 import numpy as np
-from core import PRESETS, get_preset, selected_frame_indices, validate_capture
+from core import DEFAULT_KEEP_FRAMES, DEFAULT_LOOP_SIMILARITY, MAX_KEEP_FRAMES, candidate_fps, PRESETS, get_preset, selected_frame_indices, validate_capture
 
 APP_ROOT = Path(__file__).parent
 WORK_ROOT = Path("/tmp/da3-console")
@@ -119,8 +119,9 @@ def _duration(probe: dict) -> float:
     return float(probe["format"]["duration"])
 
 
-def prepare_video(video_path: str, preset_key: str) -> tuple[Path, dict, list[str]]:
+def prepare_video(video_path: str, preset_key: str, keep_frames: int = DEFAULT_KEEP_FRAMES) -> tuple[Path, dict, list[str]]:
     preset = get_preset(preset_key)
+    keep_frames = max(preset.chunk_size, min(MAX_KEEP_FRAMES, int(keep_frames)))
     source = Path(video_path)
     if not source.exists():
         raise FileNotFoundError("Uploaded video is unavailable.")
@@ -128,10 +129,10 @@ def prepare_video(video_path: str, preset_key: str) -> tuple[Path, dict, list[st
     candidates = work / "candidates"; candidates.mkdir()
     probe = _probe(source)
     duration = _duration(probe)
-    fps = max(2, min(10, round(1000 / duration)))
+    fps = candidate_fps(duration, keep_frames)
     _run(["ffmpeg", "-hide_banner", "-nostdin", "-y", "-i", str(source), "-vf", f"fps={fps}", "-q:v", "2", str(candidates / "candidate_%05d.jpg")], timeout=900)
     frames = sorted(candidates.glob("*.jpg"))
-    indices = selected_frame_indices(len(frames), 500)
+    indices = selected_frame_indices(len(frames), keep_frames)
     selected = [frames[i] for i in indices]
     errors = validate_capture(duration, len(selected), preset)
     if errors:
@@ -143,7 +144,7 @@ def prepare_video(video_path: str, preset_key: str) -> tuple[Path, dict, list[st
             image.convert("RGB").resize((preset.width, preset.height), Image.Resampling.LANCZOS).save(
                 input_dir / f"frame_{index:05d}.jpg", quality=95
             )
-    manifest = {"source_name": source.name, "probe": probe, "candidate_frames": len(frames), "selected_frames": len(selected), "fps": fps, "preset": preset.__dict__, "gpu_input_size": [preset.width, preset.height]}
+    manifest = {"source_name": source.name, "probe": probe, "candidate_frames": len(frames), "selected_frames": len(selected), "keep_frames": keep_frames, "fps": fps, "preset": preset.__dict__, "gpu_input_size": [preset.width, preset.height]}
     (work / "input_manifest.json").write_text(json.dumps(manifest, indent=2), encoding="utf-8")
     return work, manifest, [str(path) for path in sorted(input_dir.glob("*.jpg"))]
 
@@ -180,23 +181,74 @@ def _streamer(image_dir: Path, output_dir: Path, config: dict):
     return runner
 
 
-def _config(work: Path, preset_key: str, loop_closure: bool) -> dict:
+def _config(work: Path, preset_key: str, loop_closure: bool, loop_similarity: float = DEFAULT_LOOP_SIMILARITY) -> dict:
     preset = get_preset(preset_key); weights = work / "weights"; weights.mkdir(exist_ok=True)
     salad = _stage_salad(weights) if loop_closure else weights / "dino_salad.ckpt"
     return {"Weights": {"DA3": str(MODEL_WEIGHTS), "DA3_CONFIG": str(MODEL_CONFIG), "SALAD": str(salad)},
             "Model": {"chunk_size": preset.chunk_size, "overlap": preset.overlap, "loop_chunk_size": 20, "loop_enable": loop_closure, "useDBoW": False, "delete_temp_files": True, "align_lib": "torch", "align_method": "sim3", "scale_compute_method": "auto", "align_type": "dense", "ref_view_strategy": "saddle_balanced", "ref_view_strategy_loop": "saddle_balanced", "depth_threshold": 15.0, "save_depth_conf_result": True, "save_debug_info": True, "Sparse_Align": {"keypoint_select": "orb", "keypoint_num": 5000}, "IRLS": {"delta": 0.1, "max_iters": 5, "tol": "1e-9"}, "Pointcloud_Save": {"sample_ratio": 0.015, "conf_threshold_coef": 0.75}},
-            "Loop": {"SALAD": {"image_size": [336, 336], "batch_size": 32, "similarity_threshold": 0.85, "top_k": 5, "use_nms": True, "nms_threshold": 25}, "SIM3_Optimizer": {"lang_version": "python", "max_iterations": 30, "lambda_init": "1e-6"}}}
+            "Loop": {"SALAD": {"image_size": [336, 336], "batch_size": 32, "similarity_threshold": float(loop_similarity), "top_k": 5, "use_nms": True, "nms_threshold": 25}, "SIM3_Optimizer": {"lang_version": "python", "max_iterations": 30, "lambda_init": "1e-6"}}}
+
+
+def _record_space_run(model: str, task: str, duration_ms: float, status: str = "ok", gpu_name: str | None = None, extra: dict | None = None) -> None:
+    """Best-effort telemetry emission from HF Space to VaultWares API."""
+    import json, os, urllib.request
+    from datetime import datetime, timezone
+
+    api_url = os.environ.get("VW_API_URL") or "https://api.vaultwares.ca"
+    api_key = os.environ.get("VW_TELEMETRY_API_KEY")
+    space_id = os.environ.get("SPACE_ID") or "clopeux/da3-zerogpu"
+
+    run = {
+        "run_id": os.urandom(16).hex(),
+        "provider": "huggingface",
+        "runtime": "hf-space",
+        "model": model,
+        "task": task,
+        "project": "vaultwares-studio",
+        "service": space_id,
+        "duration_ms": round(duration_ms, 2),
+        "status": status,
+        "is_free": True,
+        "cost_usd": 0.0,
+        "gpu_name": gpu_name,
+        "extra": extra or {},
+    }
+    batch = {
+        "batchIndex": 0,
+        "collectedAt": datetime.now(timezone.utc).isoformat(),
+        "schema": 1,
+        "source": "hf-space",
+        "host": space_id,
+        "runs": [run],
+    }
+    try:
+        req = urllib.request.Request(
+            f"{api_url.rstrip('/')}/api/telemetry/ai-runs/batches",
+            data=json.dumps(batch).encode("utf-8"),
+            headers={
+                "Content-Type": "application/json",
+                **({"x-api-key": api_key} if api_key else {}),
+            },
+            method="POST",
+        )
+        with urllib.request.urlopen(req, timeout=3.0):
+            pass
+    except Exception:
+        pass
 
 
 @spaces.GPU(duration=1800, size="large")
-def run_gpu(work_dir: str, preset_key: str, loop_closure: bool) -> dict:
+def run_gpu(work_dir: str, preset_key: str, loop_closure: bool, loop_similarity: float = DEFAULT_LOOP_SIMILARITY) -> dict:
     work = Path(work_dir); output = work / "streaming"; output.mkdir()
-    config = _config(work, preset_key, loop_closure)
+    config = _config(work, preset_key, loop_closure, loop_similarity)
     (output / "config.json").write_text(json.dumps(config, indent=2), encoding="utf-8")
     from loop_utils.sim3utils import merge_ply_files
     started = time.monotonic(); runner = _streamer(work / "frames", output, config); runner.run()
     merge_ply_files(str(output / "pcd"), str(output / "pcd" / "combined_pcd.ply")); runner.close()
-    return {"gpu_seconds": round(time.monotonic() - started, 3), "output": str(output), "cuda": __import__("torch").cuda.get_device_name()}
+    cuda_name = __import__("torch").cuda.get_device_name()
+    dur_s = round(time.monotonic() - started, 3)
+    _record_space_run(model=MODEL_ID, task="3d-reconstruction", duration_ms=dur_s * 1000, gpu_name=cuda_name, extra={"preset": preset_key, "loop_closure": loop_closure})
+    return {"gpu_seconds": dur_s, "output": str(output), "cuda": cuda_name}
 
 
 def package(work: Path, gpu: dict) -> tuple[str, str, str]:
@@ -274,14 +326,14 @@ def package_training(work_dir: str, gpu_summary: str) -> tuple[str, str, str]:
 TEXT = {"EN": {"title": "DA3 Reconstruction Console", "run": "Run", "diagnostics": "Diagnostics", "artifacts": "Artifacts", "about": "About", "upload": "Video", "preset": "Preset", "loop": "Enable loop closure", "validate": "Validate capture", "start": "Start GPU pass", "ready": "Ready to request GPU.", "mobile": "This experimental console requires a desktop browser."}, "QC": {"title": "Console de reconstruction DA3", "run": "Exécuter", "diagnostics": "Diagnostics", "artifacts": "Artefacts", "about": "À propos", "upload": "Vidéo", "preset": "Préréglage", "loop": "Activer la fermeture de boucle", "validate": "Valider la capture", "start": "Lancer le passage GPU", "ready": "Prêt à demander le GPU.", "mobile": "Cette console expérimentale nécessite un navigateur de bureau."}}
 
 
-def run(video, preset_key, loop_closure):
-    work, manifest, _ = prepare_video(video, preset_key)
-    gpu = run_gpu(str(work), preset_key, loop_closure)
+def run(video, preset_key, loop_closure, keep_frames=DEFAULT_KEEP_FRAMES, loop_similarity=DEFAULT_LOOP_SIMILARITY):
+    work, manifest, _ = prepare_video(video, preset_key, keep_frames)
+    gpu = run_gpu(str(work), preset_key, loop_closure, loop_similarity)
     return package(work, gpu)
 
 
-def validate(video, preset_key):
-    work, manifest, _ = prepare_video(video, preset_key)
+def validate(video, preset_key, keep_frames=DEFAULT_KEEP_FRAMES):
+    work, manifest, _ = prepare_video(video, preset_key, keep_frames)
     preset = get_preset(preset_key)
     return json.dumps({"status": "ready", "selected_frames": manifest["selected_frames"], "gpu_duration_seconds": preset.gpu_duration_seconds, "tokens_per_window": preset.tokens_per_window, "work_dir": str(work)}, indent=2)
 
@@ -293,14 +345,16 @@ with gr.Blocks(theme=gr.themes.Default(font=[gr.themes.GoogleFont("JetBrains Mon
             video = gr.Video(label="Video", sources=["upload"])
             preset = gr.Radio(choices=[("Preview", "preview"), ("High quality (experimental)", "high")], value="high", label="Preset")
             loop = gr.Checkbox(label="Enable loop closure", value=True)
+            frames = gr.Slider(minimum=90, maximum=MAX_KEEP_FRAMES, step=10, value=DEFAULT_KEEP_FRAMES, label="Frames to keep")
+            similarity = gr.Slider(minimum=0.5, maximum=0.95, step=0.01, value=DEFAULT_LOOP_SIMILARITY, label="Loop similarity threshold")
             validate_button = gr.Button("Validate capture", variant="secondary", icon="🔎")
             confirmation = gr.Code(label="Run summary", language="json")
             run_button = gr.Button("Start GPU pass", variant="primary", icon="▶")
             artifact = gr.File(label="Artifact bundle")
             report = gr.File(label="Run report")
             summary = gr.Code(label="Completion summary", language="json")
-            validate_button.click(validate, [video, preset], confirmation)
-            run_button.click(run, [video, preset, loop], [artifact, report, summary])
+            validate_button.click(validate, [video, preset, frames], confirmation)
+            run_button.click(run, [video, preset, loop, frames, similarity], [artifact, report, summary])
         with gr.Tab("Diagnostics"):
             gr.Markdown("The run summary reports selected frames, requested GPU duration, visual tokens per window, GPU timing, and output file count.")
         with gr.Tab("Artifacts"):
